@@ -169,6 +169,28 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
+  packages/ai:
+    dependencies:
+      '@repo/capture':
+        specifier: workspace:*
+        version: link:../capture
+      '@repo/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@repo/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: 26.4.1
+        version: 26.4.1
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^3.0.7
+        version: 3.2.7(@types/node@26.4.1)(jiti@2.7.0)(lightningcss@1.32.0)
+
   packages/capture:
     devDependencies:
       '@repo/typescript-config':
