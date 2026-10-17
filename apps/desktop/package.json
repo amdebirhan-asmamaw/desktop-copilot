@@ -6,11 +6,13 @@
   "scripts": {
     "build": "tsc -b",
     "check-types": "tsc --noEmit",
+    "dist": "pnpm build && electron-builder --win",
     "start": "electron .",
     "dev": "tsc -w"
   },
   "dependencies": {
-    "@repo/core": "workspace:*"
+    "@repo/core": "workspace:*",
+    "@repo/ai": "workspace:*"
   },
   "devDependencies": {
     "@repo/typescript-config": "workspace:*",

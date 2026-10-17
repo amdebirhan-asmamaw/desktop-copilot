@@ -20,6 +20,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@repo/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
       '@repo/core':
         specifier: workspace:*
         version: link:../../packages/core
