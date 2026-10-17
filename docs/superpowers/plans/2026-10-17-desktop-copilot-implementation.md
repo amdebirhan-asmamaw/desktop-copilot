@@ -4,9 +4,9 @@
 
 **Goal:** Build an agile, production-grade LockedAI-style Electron desktop copilot inside a Turborepo monorepo featuring a dual-window overlay (Floating HUD + Tri-state Ghost Text Screen Writer), dual-channel audio capture (Microphone + Windows System Loopback), screen reading and OCR understanding, Sprint-1 context awareness, and pluggable capability-based AI streaming.
 
-**Architecture:** A modular pnpm-based Turborepo containing `apps/desktop` (Electron main process & native window management), `apps/overlay` (Vite + React 19 HUD and Ghost Overlay), `packages/core` (ContextSession & local session repository), `packages/capture` (Platform-agnostic `CaptureAdapter` with `WindowsCaptureAdapter` & VAD), `packages/ai` (Model-agnostic STT, Vision, and Chat capabilities), and `packages/ui` (Shared glassmorphism and ghost typography).
+**Architecture:** A modular pnpm-based Turborepo containing `apps/desktop` (Electron main process & native window management), `apps/overlay` (Vite + React 19 HUD and Ghost Overlay styled with Tailwind CSS v4 & shadcn/ui), `packages/core` (ContextSession & local session repository), `packages/capture` (Platform-agnostic `CaptureAdapter` with `WindowsCaptureAdapter` & VAD), `packages/ai` (Model-agnostic STT, Vision, and Chat capabilities), and `packages/ui` (Shared shadcn/ui component library, CVA variants, and glassmorphic design primitives).
 
-**Tech Stack:** Turborepo 2.x, pnpm workspaces, Electron 34+, Vite 6+, React 19, TypeScript 5.8+, WebRTC AudioWorklets, Direct3D/DXGI DesktopCapturer, Vitest.
+**Tech Stack:** Turborepo 2.x, pnpm workspaces, Electron 34+, Vite 6+, React 19, Tailwind CSS v4 (@tailwindcss/vite, @tailwindcss/postcss), shadcn/ui (Radix UI primitives, CVA, clsx, tailwind-merge, Lucide React), TypeScript 5.8+, WebRTC AudioWorklets, Direct3D/DXGI DesktopCapturer, Vitest.
 
 ---
 
@@ -36,6 +36,7 @@ desktop-copilot/
 │       ├── tsconfig.json
 │       ├── index.html
 │       └── src/
+│           ├── index.css
 │           ├── main.tsx
 │           ├── App.tsx
 │           ├── hud/
@@ -90,10 +91,19 @@ desktop-copilot/
 │   │           └── chat-streaming-service.ts
 │   └── ui/
 │       ├── package.json
+│       ├── tsconfig.json
 │       └── src/
 │           ├── index.ts
-│           ├── glass-card.tsx
-│           └── ghost-typography.tsx
+│           ├── lib/
+│           │   └── utils.ts
+│           └── components/
+│               ├── button.tsx
+│               ├── badge.tsx
+│               ├── card.tsx
+│               ├── input.tsx
+│               ├── dialog.tsx
+│               ├── tooltip.tsx
+│               └── switch.tsx
 ├── turbo.json
 ├── pnpm-workspace.yaml
 └── package.json
@@ -802,18 +812,19 @@ git commit -m "feat(desktop): implement dual-window electron shell with tri-stat
 - Create: `apps/overlay/package.json`
 - Create: `apps/overlay/vite.config.ts`
 - Create: `apps/overlay/index.html`
+- Create: `apps/overlay/src/index.css`
 - Create: `apps/overlay/src/main.tsx`
 - Create: `apps/overlay/src/hud/FloatingHud.tsx`
 - Create: `apps/overlay/src/ghost/GhostOverlay.tsx`
 - Create: `apps/overlay/src/App.tsx`
 
-- [ ] **Step 1: Create `apps/overlay/package.json` and `vite.config.ts`**
+- [ ] **Step 1: Create `apps/overlay/package.json` and `vite.config.ts` with Tailwind v4**
 
 Create `apps/overlay/package.json`:
 
 ```json
 {
-  "name": "@desktop-copilot/overlay",
+  "name": "@repo/overlay",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -822,16 +833,18 @@ Create `apps/overlay/package.json`:
     "check-types": "tsc --noEmit"
   },
   "dependencies": {
-    "@desktop-copilot/core": "workspace:*",
-    "@desktop-copilot/ui": "workspace:*",
+    "@repo/core": "workspace:*",
+    "@repo/ui": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@desktop-copilot/typescript-config": "workspace:*",
+    "@repo/typescript-config": "workspace:*",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.3.3",
     "typescript": "5.8.2",
     "vite": "^6.2.0"
   }
@@ -843,16 +856,17 @@ Create `apps/overlay/vite.config.ts`:
 ```typescript
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     port: 5173
   }
 });
 ```
 
-- [ ] **Step 2: Create `index.html` and root stylesheet**
+- [ ] **Step 2: Create `index.html` and Tailwind CSS root stylesheet**
 
 Create `apps/overlay/index.html`:
 
@@ -863,25 +877,26 @@ Create `apps/overlay/index.html`:
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Desktop Copilot Overlay</title>
-    <style>
-      * {
-        box-sizing: border-box;
-        margin: 0;
-        padding: 0;
-        user-select: none;
-      }
-      body {
-        background: transparent;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-        overflow: hidden;
-      }
-    </style>
   </head>
-  <body>
+  <body class="bg-transparent overflow-hidden select-none">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
+```
+
+Create `apps/overlay/src/index.css`:
+
+```css
+@import "tailwindcss";
+@source "../../../packages/ui/src";
+
+@theme {
+  --color-hud-surface: rgba(15, 23, 42, 0.88);
+  --color-hud-border: rgba(255, 255, 255, 0.12);
+  --color-ghost-surface: rgba(15, 23, 42, 0.78);
+  --color-ghost-interactive: rgba(15, 23, 42, 0.94);
+}
 ```
 
 - [ ] **Step 3: Create `FloatingHud.tsx` and `GhostOverlay.tsx`**
@@ -913,88 +928,48 @@ export const FloatingHud: React.FC = () => {
   };
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      padding: '8px 14px',
-      background: 'rgba(20, 22, 30, 0.88)',
-      backdropFilter: 'blur(16px)',
-      borderRadius: '12px',
-      border: '1px solid rgba(255, 255, 255, 0.12)',
-      color: '#fff',
-      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.45)',
-      WebkitAppRegion: 'drag' as unknown as undefined
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{
-            width: '8px',
-            height: '8px',
-            borderRadius: '50%',
-            background: mode === 'HIDDEN' ? '#666' : mode === 'PASSIVE' ? '#10B981' : '#3B82F6'
-          }} />
-          <span style={{ fontSize: '12px', fontWeight: 600, letterSpacing: '0.5px' }}>
+    <div className="flex flex-col px-3.5 py-2 bg-slate-900/85 backdrop-blur-xl rounded-xl border border-white/10 text-white shadow-2xl [app-region:drag]">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span
+            className={`w-2 h-2 rounded-full ${
+              mode === 'HIDDEN' ? 'bg-slate-500' : mode === 'PASSIVE' ? 'bg-emerald-400' : 'bg-blue-500'
+            }`}
+          />
+          <span className="text-xs font-semibold tracking-wider">
             COPILOT: {mode}
           </span>
         </div>
 
-        <div style={{ display: 'flex', gap: '6px', WebkitAppRegion: 'no-drag' as unknown as undefined }}>
+        <div className="flex gap-1.5 [app-region:no-drag]">
           <button
             onClick={() => setMicActive(!micActive)}
-            style={{
-              padding: '4px 8px',
-              fontSize: '11px',
-              background: micActive ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-              border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: '6px',
-              color: '#fff',
-              cursor: 'pointer'
-            }}
+            className={`px-2 py-1 text-[11px] rounded-md border border-white/10 text-white cursor-pointer transition-colors ${
+              micActive ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
+            }`}
           >
             {micActive ? '🎙️ Mic ON' : '🔇 Mic OFF'}
           </button>
 
           <button
             onClick={() => setScreenActive(!screenActive)}
-            style={{
-              padding: '4px 8px',
-              fontSize: '11px',
-              background: screenActive ? 'rgba(59, 130, 246, 0.2)' : 'rgba(100, 100, 100, 0.2)',
-              border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: '6px',
-              color: '#fff',
-              cursor: 'pointer'
-            }}
+            className={`px-2 py-1 text-[11px] rounded-md border border-white/10 text-white cursor-pointer transition-colors ${
+              screenActive ? 'bg-blue-500/20 text-blue-300' : 'bg-slate-700/30 text-slate-400'
+            }`}
           >
             {screenActive ? '🖥️ Vision ON' : '🖥️ Vision OFF'}
           </button>
 
           <button
             onClick={toggleOverlayMode}
-            style={{
-              padding: '4px 8px',
-              fontSize: '11px',
-              background: 'rgba(255, 255, 255, 0.1)',
-              border: '1px solid rgba(255,255,255,0.2)',
-              borderRadius: '6px',
-              color: '#fff',
-              cursor: 'pointer'
-            }}
+            className="px-2 py-1 text-[11px] bg-white/10 hover:bg-white/15 border border-white/20 rounded-md text-white cursor-pointer transition-colors"
           >
             {mode === 'PASSIVE' ? 'Click-Through (Passive)' : 'Interactive'}
           </button>
 
           <button
             onClick={() => setShowConfigModal(true)}
-            style={{
-              padding: '4px 8px',
-              fontSize: '11px',
-              background: 'rgba(255, 255, 255, 0.15)',
-              border: 'none',
-              borderRadius: '6px',
-              color: '#fff',
-              cursor: 'pointer'
-            }}
+            className="px-2 py-1 text-[11px] bg-white/15 hover:bg-white/20 rounded-md text-white cursor-pointer transition-colors"
           >
             ⚙️ Context
           </button>
@@ -1002,43 +977,18 @@ export const FloatingHud: React.FC = () => {
       </div>
 
       {showConfigModal && (
-        <div style={{
-          marginTop: '8px',
-          padding: '8px',
-          background: 'rgba(30, 34, 45, 0.95)',
-          borderRadius: '8px',
-          border: '1px solid rgba(255,255,255,0.1)',
-          WebkitAppRegion: 'no-drag' as unknown as undefined
-        }}>
-          <div style={{ fontSize: '11px', marginBottom: '4px', color: '#94A3B8' }}>Set Initial Role / Prompt:</div>
+        <div className="mt-2 p-2 bg-slate-900/95 rounded-lg border border-white/10 [app-region:no-drag]">
+          <div className="text-[11px] mb-1 text-slate-400">Set Initial Role / Prompt:</div>
           <input
             type="text"
             value={roleInput}
             onChange={(e) => setRoleInput(e.target.value)}
             placeholder="e.g. Senior Software Architect"
-            style={{
-              width: '100%',
-              padding: '4px 8px',
-              fontSize: '11px',
-              borderRadius: '4px',
-              background: '#0F172A',
-              border: '1px solid #334155',
-              color: '#fff'
-            }}
+            className="w-full px-2 py-1 text-xs rounded bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
           />
           <button
             onClick={() => setShowConfigModal(false)}
-            style={{
-              marginTop: '6px',
-              padding: '3px 8px',
-              fontSize: '10px',
-              background: '#10B981',
-              color: '#000',
-              fontWeight: 600,
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
+            className="mt-1.5 px-2 py-1 text-[10px] font-semibold bg-emerald-400 hover:bg-emerald-300 text-slate-950 rounded cursor-pointer transition-colors"
           >
             Save Context
           </button>
@@ -1085,45 +1035,27 @@ export const GhostOverlay: React.FC = () => {
   }
 
   return (
-    <div style={{
-      position: 'absolute',
-      bottom: '80px',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      maxWidth: '780px',
-      width: '90%',
-      padding: '16px 20px',
-      background: mode === 'INTERACTIVE' ? 'rgba(15, 23, 42, 0.92)' : 'rgba(15, 23, 42, 0.75)',
-      backdropFilter: 'blur(12px)',
-      borderRadius: '16px',
-      border: mode === 'INTERACTIVE' ? '1px solid #3B82F6' : '1px solid rgba(255, 255, 255, 0.15)',
-      boxShadow: '0 12px 40px rgba(0, 0, 0, 0.6)',
-      color: '#F8FAFC',
-      fontSize: '15px',
-      lineHeight: '1.6',
-      pointerEvents: mode === 'INTERACTIVE' ? 'auto' : 'none',
-      userSelect: mode === 'INTERACTIVE' ? 'text' : 'none'
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-        <span style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '1px', color: '#38BDF8', fontWeight: 700 }}>
+    <div
+      className={`fixed bottom-20 left-1/2 -translate-x-1/2 max-w-3xl w-11/12 p-5 backdrop-blur-xl rounded-2xl shadow-2xl text-slate-50 text-[15px] leading-relaxed transition-all duration-200 ${
+        mode === 'INTERACTIVE'
+          ? 'bg-slate-950/90 border border-blue-500 shadow-blue-500/10 pointer-events-auto select-text'
+          : 'bg-slate-950/75 border border-white/15 pointer-events-none select-none'
+      }`}
+    >
+      <div className="flex justify-between items-center mb-2">
+        <span className="text-[11px] uppercase tracking-widest text-sky-400 font-bold">
           ⚡ Copilot Answer Suggestion {mode === 'INTERACTIVE' && '(Interactive Mode)'}
         </span>
         {mode === 'INTERACTIVE' && (
           <button
             onClick={() => setStreamedText('')}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: '#94A3B8',
-              cursor: 'pointer',
-              fontSize: '12px'
-            }}
+            className="text-slate-400 hover:text-white cursor-pointer text-xs transition-colors"
           >
             ✕ Dismiss
           </button>
         )}
       </div>
-      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'system-ui, sans-serif' }}>
+      <div className="whitespace-pre-wrap break-words font-sans">
         {streamedText}
       </div>
     </div>
@@ -1155,6 +1087,7 @@ Create `apps/overlay/src/main.tsx`:
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
+import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

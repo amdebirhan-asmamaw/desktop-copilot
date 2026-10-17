@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-17
 - **Target OS**: Windows 11 / 10 (with extensible cross-platform adapter stubs)
-- **Monorepo Engine**: Turborepo (npm workspaces)
-- **Application Shell**: Electron + Vite + React + TypeScript
+- **Monorepo Engine**: Turborepo (pnpm workspaces)
+- **Application Shell**: Electron + Vite + React 19 + Tailwind CSS + shadcn/ui + TypeScript
 
 ---
 
@@ -37,7 +37,7 @@ desktop-copilot/
 │   │   ├── package.json
 │   │   └── tsconfig.json
 │   │
-│   └── overlay/                 # Vite + React 19 + TypeScript renderer application
+│   └── overlay/                 # Vite + React 19 + Tailwind CSS + TypeScript renderer application
 │       ├── src/
 │       │   ├── hud/             # Floating Control HUD (draggable pill, settings, session config)
 │       │   ├── ghost/           # Ghost Text Overlay (streamed text, subtitles, drawing)
@@ -70,11 +70,19 @@ desktop-copilot/
 │   │   │   └── provider.ts      # Config-driven capability factory
 │   │   └── package.json
 │   │
-│   ├── ui/                      # Shared design tokens & atomic components
+│   ├── ui/                      # Shared shadcn/ui components & design primitives (Tailwind CSS)
 │   │   ├── src/
-│   │   │   ├── button.tsx
-│   │   │   ├── typography.tsx   # Ghost text styling & animations
-│   │   │   └── glass-panel.tsx
+│   │   │   ├── lib/
+│   │   │   │   └── utils.ts     # shadcn cn() helper (clsx + tailwind-merge)
+│   │   │   ├── components/
+│   │   │   │   ├── button.tsx   # shadcn Button with CVA variants
+│   │   │   │   ├── badge.tsx    # Mode indicator badges (PASSIVE, INTERACTIVE, HIDDEN)
+│   │   │   │   ├── card.tsx     # Translucent glassmorphism card surfaces
+│   │   │   │   ├── input.tsx    # Context role and prompt configuration input
+│   │   │   │   ├── dialog.tsx   # Context setup modal dialog (strictly no Drawer/Sheet)
+│   │   │   │   ├── tooltip.tsx  # Interactive HUD cues and shortcuts
+│   │   │   │   └── switch.tsx   # Accessible toggle switch for audio/vision
+│   │   │   └── index.ts
 │   │   └── package.json
 │   │
 │   ├── eslint-config/
