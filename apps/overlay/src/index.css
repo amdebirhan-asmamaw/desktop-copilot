@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@source "../../../packages/ui/src";
+
+@theme {
+  --color-hud-surface: rgba(15, 23, 42, 0.88);
+  --color-hud-border: rgba(255, 255, 255, 0.12);
+  --color-ghost-surface: rgba(15, 23, 42, 0.78);
+  --color-ghost-interactive: rgba(15, 23, 42, 0.94);
+}
