@@ -66,6 +66,25 @@ export const FloatingHud: React.FC = () => {
 
           <Button
             size="sm"
+            variant="emerald"
+            onClick={async () => {
+              const api = (window as unknown as {
+                copilotApi?: {
+                  feedTranscript?: (p: { speaker: 'REMOTE_SPEAKER'; text: string }) => Promise<void>;
+                };
+              }).copilotApi;
+              await api?.feedTranscript?.({
+                speaker: 'REMOTE_SPEAKER',
+                text: 'Can you explain your approach to handling database sharding and cross-shard queries?'
+              });
+            }}
+            title="Simulate incoming interviewer question"
+          >
+            ⚡ Demo Q&A
+          </Button>
+
+          <Button
+            size="sm"
             variant="outline"
             onClick={() => setShowConfigModal(true)}
           >

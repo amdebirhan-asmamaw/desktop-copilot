@@ -8,6 +8,7 @@ export interface ElectronCopilotApi {
   onGhostTextChunk: (callback: (text: string) => void) => () => void;
   createSession: (initialContext: unknown) => Promise<unknown>;
   getSession: (sessionId: string) => Promise<unknown>;
+  feedTranscript: (payload: { sessionId?: string; speaker: 'USER' | 'REMOTE_SPEAKER'; text: string }) => Promise<void>;
 }
 
 const api: ElectronCopilotApi = {
@@ -25,7 +26,8 @@ const api: ElectronCopilotApi = {
     return () => ipcRenderer.removeListener('ghost:stream-chunk', handler);
   },
   createSession: (initialContext) => ipcRenderer.invoke('session:create', initialContext),
-  getSession: (sessionId) => ipcRenderer.invoke('session:get', sessionId)
+  getSession: (sessionId) => ipcRenderer.invoke('session:get', sessionId),
+  feedTranscript: (payload) => ipcRenderer.invoke('session:feed-transcript', payload)
 };
 
 contextBridge.exposeInMainWorld('copilotApi', api);

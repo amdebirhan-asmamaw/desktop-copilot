@@ -60,9 +60,17 @@ export function applyOverlayMode(mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN'): vo
   ghostWin.webContents.send('overlay:mode-changed', mode);
 }
 
-app.whenReady().then(() => {
+let activeSessionId: string | null = null;
+
+app.whenReady().then(async () => {
   ghostWin = createGhostOverlayWindow(rendererUrl);
   hudWin = createHudWindow(rendererUrl);
+
+  const initialSession = await sessionManager.createSession({
+    roleOrPersona: 'Senior Distributed Systems Architect',
+    instructions: 'Keep responses concise with structured bullet points'
+  });
+  activeSessionId = initialSession.sessionId;
 
   // Global Hotkey 1: Privacy/Panic Hide Toggle (Ctrl+Shift+H)
   globalShortcut.register('CommandOrControl+Shift+H', () => {
@@ -75,6 +83,17 @@ app.whenReady().then(() => {
     applyOverlayMode(currentMode === 'PASSIVE' ? 'INTERACTIVE' : 'PASSIVE');
   });
 
+  // Global Hotkey 3: Demo Q&A Trigger (Ctrl+Shift+T)
+  globalShortcut.register('CommandOrControl+Shift+T', () => {
+    if (activeSessionId) {
+      handleIncomingTranscript(
+        activeSessionId,
+        'REMOTE_SPEAKER',
+        'How do you handle network partitions and split-brain scenarios in a distributed cluster?'
+      );
+    }
+  });
+
   // IPC Handlers
   ipcMain.handle('overlay:set-mode', (_, mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => applyOverlayMode(mode));
   ipcMain.handle('overlay:get-mode', () => currentMode);
@@ -84,11 +103,15 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('session:feed-transcript', async (_, { sessionId, speaker, text }) => {
-    return handleIncomingTranscript(sessionId, speaker, text);
+    const targetId = sessionId || activeSessionId;
+    if (!targetId) return;
+    return handleIncomingTranscript(targetId, speaker, text);
   });
 
   ipcMain.handle('session:create', async (_, initialContext) => {
-    return sessionManager.createSession(initialContext);
+    const sess = await sessionManager.createSession(initialContext);
+    activeSessionId = sess.sessionId;
+    return sess;
   });
 
   ipcMain.handle('session:get', async (_, sessionId: string) => {
