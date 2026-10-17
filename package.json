@@ -23,5 +23,10 @@
       "name": "pnpm",
       "version": "10.12.1"
     }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
   }
 }
