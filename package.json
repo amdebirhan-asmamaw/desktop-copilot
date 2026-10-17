@@ -16,14 +16,11 @@
   "engines": {
     "node": ">=24"
   },
+  "packageManager": "pnpm@10.12.1",
   "devEngines": {
     "packageManager": {
-      "name": "npm",
-      "version": "10.9.2"
+      "name": "pnpm",
+      "version": "10.12.1"
     }
-  },
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ]
+  }
 }
