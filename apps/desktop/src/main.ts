@@ -6,6 +6,22 @@ import { createGhostOverlayWindow } from './windows/ghost-overlay-window.js';
 import { SessionManager, JsonSessionStore, isQuestionIntent } from '@repo/core';
 import { ConfigurableChatStreamingService, loadAIConfigFromEnv } from '@repo/ai';
 
+// Ensure clean application name and isolated user data directory (avoids scoped package name / Windows cache errors)
+app.setName('desktop-copilot');
+const appDataRoot = app.getPath('appData');
+const userDataDir = path.join(appDataRoot, 'desktop-copilot');
+if (!fs.existsSync(userDataDir)) {
+  fs.mkdirSync(userDataDir, { recursive: true });
+}
+app.setPath('userData', userDataDir);
+
+// Prevent multiple simultaneous Electron instances from colliding on Chromium disk cache
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+  process.exit(0);
+}
+
 // Automatically load .env file if present in workspace root or app directory
 const possibleEnvPaths = [
   path.resolve(process.cwd(), '.env'),
@@ -129,6 +145,13 @@ export function applyOverlayMode(mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN'): vo
 }
 
 let activeSessionId: string | null = null;
+
+app.on('second-instance', () => {
+  if (hudWin && !hudWin.isDestroyed()) {
+    if (hudWin.isMinimized()) hudWin.restore();
+    hudWin.focus();
+  }
+});
 
 app.whenReady().then(async () => {
   const targetUrl = await resolveRendererUrl();
