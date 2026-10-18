@@ -20,16 +20,19 @@ export class DemoAdapter implements AIProviderAdapter {
       isDemo: true
     };
 
-    const role = payload.initialContext?.roleOrPersona || 'Senior Software Engineer';
+    const topic = question
+      .replace(/^((can you|could you|please)\s+)?(explain|describe|tell me about|how (do|would|to)|what (is|are))\s+/i, '')
+      .replace(/\?+$/, '')
+      .trim() || 'this architecture';
 
     const tokens = [
-      `The strategies for handling database sharding and cross-shard queries include `,
-      `selecting a high-cardinality shard key to prevent hotspots, `,
-      `employing consistent hashing with virtual nodes for balanced data distribution, `,
-      `using distributed query routers to scatter-gather cross-shard operations, `,
-      `and coordinating multi-shard transactions using the Saga pattern with idempotent compensating actions.\n\n`,
-      `• **Architecture**: Route queries through a stateless proxy layer that caches cluster topology and executes parallel shard fan-outs.\n`,
-      `• **Trade-offs**: Prioritizes horizontal write throughput and partition tolerance (CP) over low-latency cross-shard joins.`
+      `Addressing ${topic} requires `,
+      `implementing decoupled architectural components, `,
+      `enforcing strict data consistency contracts, `,
+      `optimizing high-throughput access paths, `,
+      `and designing for resilient failure modes with automated recovery.\n\n`,
+      `• **Core Architecture**: Establish an asynchronous, event-driven foundation with clear interface boundaries and state isolation.\n`,
+      `• **Trade-offs**: Balances low-latency operational efficiency against horizontal scalability and partition tolerance under high concurrency.`
     ];
 
     for (const token of tokens) {
