@@ -24,7 +24,7 @@ export class GeminiSTTProvider {
           role: 'user',
           parts: [
             {
-              text: 'Transcribe the spoken audio verbatim. Return ONLY the transcribed sentence with appropriate punctuation. Do not add any preamble, quotes, commentary, or markdown.'
+              text: 'Transcribe the spoken words verbatim. If the audio contains only silence, breathing, sighs, throat clearing, background clicks, or no clear human speech, return an empty string "". Do NOT describe noises or add commentary. Return ONLY the transcribed words with standard punctuation.'
             },
             {
               inlineData: {
@@ -54,8 +54,22 @@ export class GeminiSTTProvider {
       }
 
       const json = await res.json();
-      const text = json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
-      return text;
+      const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+      if (!rawText || rawText.length === 0) return null;
+
+      // Reject hallucinated sound descriptions, sighs, breaths, coughs, whispers
+      const noisePattern = /(quiet\s+breath|breath|sigh|\*sigh\*|\[breath\]|\[sigh\]|\[silence\]|\[cough\]|throat\s*clear|gasp|whisper)/i;
+      if (noisePattern.test(rawText) && rawText.length < 40) {
+        return null;
+      }
+
+      // Reject non-alphanumeric noise strings or garbled unicode (require at least 2 alphanumeric characters)
+      const alphanumericChars = rawText.match(/[a-zA-Z0-9]/g);
+      if (!alphanumericChars || alphanumericChars.length < 2) {
+        return null;
+      }
+
+      return rawText;
     } catch (err) {
       console.error('[Gemini STT] Network exception:', err);
       return null;

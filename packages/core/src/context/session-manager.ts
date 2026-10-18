@@ -97,4 +97,9 @@ export class SessionManager {
       latestSnapshot
     };
   }
+
+  async listSessions(): Promise<ContextSession[]> {
+    const sessions = await this.repository.listAll();
+    return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
 }

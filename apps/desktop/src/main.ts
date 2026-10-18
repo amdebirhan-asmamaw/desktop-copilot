@@ -413,18 +413,6 @@ app.whenReady().then(async () => {
     hudWin?.webContents.send('hud:adjust-opacity', +0.05);
   });
 
-  // Global Hotkey 5: Demo Q&A Trigger (Ctrl+Shift+T)
-  const demoHotkey = process.env.HOTKEY_DEMO_TRIGGER || 'CommandOrControl+Shift+T';
-  globalShortcut.register(demoHotkey, () => {
-    if (activeSessionId) {
-      handleIncomingTranscript(
-        activeSessionId,
-        'REMOTE_SPEAKER',
-        'How do you handle network partitions and split-brain scenarios in a distributed cluster?',
-        true
-      );
-    }
-  });
 
   // Application menu with Edit commands (enables native Ctrl+C / Ctrl+V / Ctrl+A in Windows frameless windows)
   const editMenuTemplate: Electron.MenuItemConstructorOptions[] = [
@@ -604,8 +592,23 @@ app.whenReady().then(async () => {
     return sess;
   });
 
-  ipcMain.handle('session:get', async (_, sessionId: string) => {
-    return sessionManager.getSession(sessionId);
+  ipcMain.handle('session:get', async (_, sessionId?: string) => {
+    const targetId = sessionId || activeSessionId;
+    if (!targetId) return null;
+    return sessionManager.getSession(targetId);
+  });
+
+  ipcMain.handle('session:list', async () => {
+    return sessionManager.listSessions();
+  });
+
+  ipcMain.handle('session:switch', async (_, sessionId: string) => {
+    const sess = await sessionManager.getSession(sessionId);
+    if (sess) {
+      activeSessionId = sess.sessionId;
+      return sess;
+    }
+    return null;
   });
 
   // Audio Stream & System Loopback IPC Handlers

@@ -1,27 +1,27 @@
 {
-  "sess_1792319448022_k7fuz": {
-    "sessionId": "sess_1792319448022_k7fuz",
-    "createdAt": 1792319448022,
-    "updatedAt": 1792319448187,
+  "sess_1792327751951_pepqu": {
+    "sessionId": "sess_1792327751951_pepqu",
+    "createdAt": 1792327751951,
+    "updatedAt": 1792327751967,
     "initialContext": {
       "roleOrPersona": "Staff Engineer"
     },
     "transcripts": [
       {
-        "id": "turn_1792319448063_nv2i",
-        "timestamp": 1792319448063,
+        "id": "turn_1792327751955_5lgx",
+        "timestamp": 1792327751955,
         "speaker": "REMOTE_SPEAKER",
         "text": "What is Raft?"
       },
       {
-        "id": "turn_1792319448112_1xte",
-        "timestamp": 1792319448112,
+        "id": "turn_1792327751961_lwvi",
+        "timestamp": 1792327751961,
         "speaker": "ASSISTANT",
         "text": "Raft is a leader-based consensus algorithm."
       },
       {
-        "id": "turn_1792319448187_7oe6",
-        "timestamp": 1792319448187,
+        "id": "turn_1792327751967_nski",
+        "timestamp": 1792327751967,
         "speaker": "REMOTE_SPEAKER",
         "text": "How does it handle split votes?"
       }

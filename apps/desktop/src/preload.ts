@@ -37,8 +37,10 @@ export interface ElectronCopilotApi {
   onGhostStreamEnd: (callback: (data: GhostStreamEndPayload) => void) => () => void;
   onGhostStreamError: (callback: (data: GhostStreamErrorPayload) => void) => () => void;
   onTranscriptEvent: (callback: (data: TranscriptEventPayload) => void) => () => void;
-  createSession: (initialContext: unknown) => Promise<unknown>;
-  getSession: (sessionId: string) => Promise<unknown>;
+  createSession: (initialContext?: unknown) => Promise<unknown>;
+  getSession: (sessionId?: string) => Promise<unknown>;
+  listSessions: () => Promise<any[]>;
+  switchSession: (sessionId: string) => Promise<unknown>;
   feedTranscript: (payload: {
     sessionId?: string;
     speaker: 'USER' | 'REMOTE_SPEAKER';
@@ -105,6 +107,8 @@ const api: ElectronCopilotApi = {
   },
   createSession: (initialContext) => ipcRenderer.invoke('session:create', initialContext),
   getSession: (sessionId) => ipcRenderer.invoke('session:get', sessionId),
+  listSessions: () => ipcRenderer.invoke('session:list'),
+  switchSession: (sessionId) => ipcRenderer.invoke('session:switch', sessionId),
   feedTranscript: (payload) => ipcRenderer.invoke('session:feed-transcript', payload),
   captureScreenSnapshot: () => ipcRenderer.invoke('screen:capture-snapshot'),
   cancelActiveRequest: () => ipcRenderer.invoke('pipeline:cancel-active'),
