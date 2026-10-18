@@ -57,26 +57,52 @@ export class GeminiAdapter implements AIProviderAdapter {
       'You are Desktop Copilot, an ultra-fast, expert technical interview assistant.',
       payload.initialContext?.roleOrPersona ? `Role Persona: ${payload.initialContext.roleOrPersona}.` : '',
       payload.initialContext?.instructions ? `Guidance: ${payload.initialContext.instructions}.` : '',
-      'Format output in concise, structured markdown with bullet points and bold key technical terms. Zero filler.'
+      'Answer directly with maximum conciseness. Use at most 3-4 structured bullet points with bold keywords and architecture trade-offs. Zero filler or conversational preamble.'
     ].filter(Boolean).join(' ');
 
-    const contents = [
-      {
-        role: 'user',
-        parts: [{ text: `${systemInstruction}\n\nQuestion: ${question}` }]
+    const requestBody = {
+      systemInstruction: {
+        parts: [{ text: systemInstruction }]
+      },
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: `Question: ${question}` }]
+        }
+      ],
+      generationConfig: {
+        temperature: Math.min(this.temperature ?? 0.3, 0.3),
+        maxOutputTokens: 650,
+        thinkingConfig: {
+          thinkingLevel: 'low'
+        }
       }
-    ];
+    };
 
     try {
-      const response = await fetch(targetUrl, {
+      let response = await fetch(targetUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents,
-          generationConfig: { temperature: this.temperature }
-        }),
+        body: JSON.stringify(requestBody),
         signal
       });
+
+      // Fallback: if thinkingConfig is rejected by a specific model endpoint, retry without thinkingConfig
+      if (!response.ok && response.status === 400) {
+        const fallbackBody = {
+          ...requestBody,
+          generationConfig: {
+            temperature: Math.min(this.temperature ?? 0.3, 0.3),
+            maxOutputTokens: 650
+          }
+        };
+        response = await fetch(targetUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fallbackBody),
+          signal
+        });
+      }
 
       if (!response.ok) {
         const errText = await response.text().catch(() => '');

@@ -562,6 +562,19 @@ export const FloatingHud: React.FC = () => {
                 </div>
               )}
 
+              {/* Thinking / Streaming placeholder before first token */}
+              {answerStatus === 'STREAMING' && !streamedText && (
+                <div className="bg-slate-900/60 border border-sky-500/20 rounded-xl p-3 flex items-center gap-2.5 text-xs text-sky-200">
+                  <span className="relative flex h-2 w-2 shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-400"></span>
+                  </span>
+                  <span className="font-medium animate-pulse text-[11px] text-sky-300">
+                    Analyzing question & generating key points...
+                  </span>
+                </div>
+              )}
+
               {/* Answer Block */}
               {streamedText && (
                 <div className="bg-slate-900/60 border border-white/10 rounded-xl p-3.5 flex flex-col space-y-2">
