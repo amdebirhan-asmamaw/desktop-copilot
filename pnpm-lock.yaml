@@ -23,6 +23,9 @@ importers:
       '@repo/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@repo/capture':
+        specifier: workspace:*
+        version: link:../../packages/capture
       '@repo/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -36,52 +39,6 @@ importers:
       electron:
         specifier: ^34.3.0
         version: 34.5.8
-      typescript:
-        specifier: 7.0.2
-        version: 7.0.2
-
-  apps/docs:
-    dependencies:
-      '@repo/ui':
-        specifier: workspace:*
-        version: link:../../packages/ui
-      next:
-        specifier: 16.3.8
-        version: 16.3.8(@types/node@26.4.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      react:
-        specifier: 19.2.8
-        version: 19.2.8
-      react-dom:
-        specifier: 19.2.8
-        version: 19.2.8(react@19.2.8)
-    devDependencies:
-      '@repo/eslint-config':
-        specifier: workspace:*
-        version: link:../../packages/eslint-config
-      '@repo/typescript-config':
-        specifier: workspace:*
-        version: link:../../packages/typescript-config
-      '@tailwindcss/postcss':
-        specifier: ^4.3.3
-        version: 4.3.3
-      '@types/node':
-        specifier: 26.4.1
-        version: 26.4.1
-      '@types/react':
-        specifier: 19.2.18
-        version: 19.2.18
-      '@types/react-dom':
-        specifier: 19.2.5
-        version: 19.2.5(@types/react@19.2.18)
-      eslint:
-        specifier: 10.9.1
-        version: 10.9.1(jiti@2.7.0)
-      postcss:
-        specifier: ^8.5.30
-        version: 8.5.30
-      tailwindcss:
-        specifier: ^4.3.3
-        version: 4.3.3
       typescript:
         specifier: 7.0.2
         version: 7.0.2
