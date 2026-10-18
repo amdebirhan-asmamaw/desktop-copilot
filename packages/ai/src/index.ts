@@ -4,3 +4,4 @@ export * from './stt/stt-service';
 export * from './vision/vision-service';
 export * from './chat/chat-streaming-service';
 export * from './providers/index';
+export * from './prompts/interview-prompt';

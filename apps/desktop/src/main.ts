@@ -231,7 +231,7 @@ app.whenReady().then(async () => {
 
   const initialSession = await sessionManager.createSession({
     roleOrPersona: 'Senior Distributed Systems Architect',
-    instructions: 'Keep responses concise with structured bullet points and high-level trade-offs'
+    instructions: 'Deliver a spoken-ready conversational sentence opening with 5-7 concrete technical terms, followed by 2-3 key trade-off bullet points. Zero conversational filler.'
   });
   activeSessionId = initialSession.sessionId;
 

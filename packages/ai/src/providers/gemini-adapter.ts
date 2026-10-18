@@ -1,5 +1,6 @@
 import { ContextPayload, AIStreamEvent } from '@repo/core';
 import { AIProviderAdapter, StreamOptions } from './types';
+import { buildInterviewSystemPrompt } from '../prompts/interview-prompt';
 
 export interface GeminiAdapterConfig {
   apiKey: string;
@@ -53,12 +54,7 @@ export class GeminiAdapter implements AIProviderAdapter {
       this.endpoint ||
       `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
 
-    const systemInstruction = [
-      'You are Desktop Copilot, an ultra-fast, expert technical interview assistant.',
-      payload.initialContext?.roleOrPersona ? `Role Persona: ${payload.initialContext.roleOrPersona}.` : '',
-      payload.initialContext?.instructions ? `Guidance: ${payload.initialContext.instructions}.` : '',
-      'Answer directly with maximum conciseness. Use at most 3-4 structured bullet points with bold keywords and architecture trade-offs. Zero filler or conversational preamble.'
-    ].filter(Boolean).join(' ');
+    const systemInstruction = buildInterviewSystemPrompt(payload);
 
     const requestBody = {
       systemInstruction: {

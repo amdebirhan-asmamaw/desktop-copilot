@@ -29,7 +29,7 @@ export const FloatingHud: React.FC = () => {
   const [showConfigModal, setShowConfigModal] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const [roleInput, setRoleInput] = useState<string>('Senior Distributed Systems Architect');
-  const [instructionsInput, setInstructionsInput] = useState<string>('Keep answers concise with structured bullet points and high-level trade-offs');
+  const [instructionsInput, setInstructionsInput] = useState<string>('Deliver a spoken-ready conversational sentence opening with 5-7 concrete technical terms, followed by 2-3 key trade-off bullet points. Zero conversational filler.');
   const [quickPrompt, setQuickPrompt] = useState<string>('');
   const [providerInfo, setProviderInfo] = useState<{ provider: string; model: string; isDemo: boolean } | null>(null);
   const [latestTranscript, setLatestTranscript] = useState<{ speaker: string; text: string } | null>(null);

@@ -1,5 +1,6 @@
 import { ContextPayload, AIStreamEvent } from '@repo/core';
 import { AIProviderAdapter, StreamOptions } from './types';
+import { buildInterviewSystemPrompt } from '../prompts/interview-prompt';
 
 export interface AnthropicAdapterConfig {
   apiKey: string;
@@ -49,12 +50,7 @@ export class AnthropicAdapter implements AIProviderAdapter {
       isDemo: false
     };
 
-    const systemPrompt = [
-      'You are Desktop Copilot, an ultra-fast, expert technical interview assistant.',
-      payload.initialContext?.roleOrPersona ? `Role Persona: ${payload.initialContext.roleOrPersona}.` : '',
-      payload.initialContext?.instructions ? `Guidance: ${payload.initialContext.instructions}.` : '',
-      'Format output in concise, structured markdown with bullet points and bold key technical terms. Zero filler.'
-    ].filter(Boolean).join(' ');
+    const systemPrompt = buildInterviewSystemPrompt(payload);
 
     try {
       const response = await fetch(this.endpoint, {

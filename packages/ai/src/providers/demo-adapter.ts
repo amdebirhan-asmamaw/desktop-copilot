@@ -23,17 +23,13 @@ export class DemoAdapter implements AIProviderAdapter {
     const role = payload.initialContext?.roleOrPersona || 'Senior Software Engineer';
 
     const tokens = [
-      `### Key Points (${role})\n\n`,
-      `• **Core Principle**: `,
-      `Address the problem using `,
-      `decoupled, asynchronous communication `,
-      `to avoid cascading failures.\n`,
-      `• **Architecture**: `,
-      `Employ an idempotent state machine `,
-      `with write-ahead logging and partitioned storage.\n`,
-      `• **Trade-offs**: `,
-      `Favors consistency and partition tolerance (CP) `,
-      `over maximum availability during network split events.`
+      `The strategies for handling database sharding and cross-shard queries include `,
+      `selecting a high-cardinality shard key to prevent hotspots, `,
+      `employing consistent hashing with virtual nodes for balanced data distribution, `,
+      `using distributed query routers to scatter-gather cross-shard operations, `,
+      `and coordinating multi-shard transactions using the Saga pattern with idempotent compensating actions.\n\n`,
+      `• **Architecture**: Route queries through a stateless proxy layer that caches cluster topology and executes parallel shard fan-outs.\n`,
+      `• **Trade-offs**: Prioritizes horizontal write throughput and partition tolerance (CP) over low-latency cross-shard joins.`
     ];
 
     for (const token of tokens) {
