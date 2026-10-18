@@ -21,6 +21,10 @@ export function createHudWindow(rendererUrl: string): BrowserWindow {
     }
   });
 
+  win.webContents.on('did-fail-load', (_, errorCode, errorDescription, validatedURL) => {
+    console.error(`[HUD Window] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+  });
+
   if (rendererUrl.startsWith('http://') || rendererUrl.startsWith('https://')) {
     win.loadURL(`${rendererUrl}/hud`);
   } else {

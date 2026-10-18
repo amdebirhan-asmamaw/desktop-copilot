@@ -9,7 +9,7 @@ export class ConfigurableSTTService implements STTService {
 
   constructor(config: CapabilityModelConfig) {
     this.config = config;
-    if (config.apiKey && config.provider !== 'mock') {
+    if (config.apiKey && config.apiKey !== 'local' && config.provider !== 'mock') {
       this.geminiStt = new GeminiSTTProvider({
         apiKey: config.apiKey,
         model: config.model || 'gemini-3.8-flash'
@@ -33,16 +33,6 @@ export class ConfigurableSTTService implements STTService {
       }
     }
 
-    // Explicit Mock fallback when provider is mock
-    if (this.config.provider === 'mock') {
-      return {
-        text: chunk.source === 'MICROPHONE' ? 'I am explaining the database schema.' : 'What is the recovery protocol?',
-        isFinal: true,
-        speaker: chunk.source === 'MICROPHONE' ? 'USER' : 'REMOTE_SPEAKER',
-        timestamp: chunk.timestamp
-      };
-    }
-
     return null;
   }
 
@@ -60,15 +50,6 @@ export class ConfigurableSTTService implements STTService {
           timestamp: Date.now()
         };
       }
-    }
-
-    if (this.config.provider === 'mock') {
-      return {
-        text: source === 'MICROPHONE' ? 'I am explaining the database schema.' : 'What is the recovery protocol?',
-        isFinal: true,
-        speaker: source === 'MICROPHONE' ? 'USER' : 'REMOTE_SPEAKER',
-        timestamp: Date.now()
-      };
     }
 
     return null;

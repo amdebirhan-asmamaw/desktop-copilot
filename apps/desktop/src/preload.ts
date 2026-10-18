@@ -66,6 +66,8 @@ export interface ElectronCopilotApi {
   onAudioLevels: (callback: (levels: number[]) => void) => () => void;
   feedAudioPcm: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void;
   getSystemAudioSourceId: () => Promise<string | null>;
+  quitApp: () => Promise<void>;
+  minimizeApp: () => Promise<void>;
 }
 
 const api: ElectronCopilotApi = {
@@ -128,7 +130,9 @@ const api: ElectronCopilotApi = {
     return () => ipcRenderer.removeListener('hud:audio-levels', handler);
   },
   feedAudioPcm: (source, pcm) => ipcRenderer.send('audio:feed-pcm', { source, pcm }),
-  getSystemAudioSourceId: () => ipcRenderer.invoke('audio:get-system-source-id')
+  getSystemAudioSourceId: () => ipcRenderer.invoke('audio:get-system-source-id'),
+  quitApp: () => ipcRenderer.invoke('app:quit'),
+  minimizeApp: () => ipcRenderer.invoke('app:minimize')
 };
 
 contextBridge.exposeInMainWorld('copilotApi', api);

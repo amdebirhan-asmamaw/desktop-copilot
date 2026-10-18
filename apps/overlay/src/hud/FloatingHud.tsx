@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Button, Card, Dialog } from '@repo/ui';
 import { AudioWaveform } from './AudioWaveform';
 import { MarkdownRenderer } from '../ghost/MarkdownRenderer';
-import { MicIcon, ScreenIcon, DropletIcon, EyeIcon, GearIcon, SparklesIcon, StopIcon, RetryIcon } from './Icons';
+import { MicIcon, ScreenIcon, DropletIcon, EyeIcon, GearIcon, SparklesIcon, StopIcon, RetryIcon, CloseIcon, MinimizeIcon } from './Icons';
 
 interface CopilotApiBridge {
   onOverlayModeChanged?: (cb: (m: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => void) => () => void;
@@ -24,6 +24,8 @@ interface CopilotApiBridge {
   onAudioLevels?: (cb: (levels: number[]) => void) => () => void;
   feedAudioPcm?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void;
   getSystemAudioSourceId?: () => Promise<string | null>;
+  quitApp?: () => Promise<void>;
+  minimizeApp?: () => Promise<void>;
   onGhostStreamStart?: (cb: (data: { requestId: string; question: string; isDemo?: boolean }) => void) => () => void;
   onGhostStreamChunk?: (cb: (data: { requestId: string; text: string }) => void) => () => void;
   onGhostStreamEnd?: (cb: (data: { requestId: string; fullAnswer?: string }) => void) => () => void;
@@ -148,7 +150,7 @@ export const FloatingHud: React.FC = () => {
   const [instructionsInput, setInstructionsInput] = useState<string>('Deliver a spoken-ready conversational sentence opening with 5-7 concrete technical terms, followed by 2-3 key trade-off bullet points. Zero conversational filler.');
   const [quickPrompt, setQuickPrompt] = useState<string>('');
   const [providerInfo, setProviderInfo] = useState<{ provider: string; model: string; isDemo: boolean } | null>(null);
-  const [latestTranscript, setLatestTranscript] = useState<{ speaker: string; text: string } | null>(null);
+  const [latestTranscript, setLatestTranscript] = useState<{ speaker: string; text: string; isFinal: boolean } | null>(null);
 
   // Unified Answer & Stream State
   const [currentQuestion, setCurrentQuestion] = useState<string>('');
@@ -187,7 +189,8 @@ export const FloatingHud: React.FC = () => {
     const unsubTranscript = api.onTranscriptEvent?.((data) => {
       setLatestTranscript({
         speaker: data.speaker === 'REMOTE_SPEAKER' ? 'Interviewer' : 'You',
-        text: data.text
+        text: data.text,
+        isFinal: data.isFinal
       });
     });
 
@@ -735,6 +738,33 @@ export const FloatingHud: React.FC = () => {
             >
               <GearIcon className="w-3.5 h-3.5 text-slate-300" />
             </button>
+
+            {/* Window Controls: Minimize & Close */}
+            <div className="flex items-center gap-1 pl-1 ml-0.5 border-l border-white/10">
+              <button
+                type="button"
+                onClick={async () => {
+                  const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+                  await api?.minimizeApp?.();
+                }}
+                className="h-7 w-7 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 border border-transparent hover:border-white/10 transition-all flex items-center justify-center select-none"
+                title="Minimize / Hide to System Tray (Ctrl+Shift+H)"
+              >
+                <MinimizeIcon className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+                  await api?.quitApp?.();
+                }}
+                className="h-7 w-7 rounded-lg text-slate-400 hover:text-rose-300 hover:bg-rose-500/20 hover:border-rose-400/40 border border-transparent transition-all flex items-center justify-center select-none"
+                title="Exit Desktop Copilot"
+              >
+                <CloseIcon className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -756,11 +786,20 @@ export const FloatingHud: React.FC = () => {
 
           {latestTranscript && (
             <div
-              className="max-w-[230px] truncate text-[10px] text-slate-300 bg-white/5 px-2.5 py-1.5 rounded-lg border border-white/10 select-none flex items-center gap-1"
+              className={`max-w-[260px] truncate text-[10px] px-2.5 py-1.5 rounded-lg border select-none flex items-center gap-1.5 transition-all ${
+                latestTranscript.isFinal
+                  ? 'text-slate-200 bg-white/10 border-white/15'
+                  : 'text-slate-300 bg-sky-500/10 border-sky-400/30 italic'
+              }`}
               title={`${latestTranscript.speaker}: ${latestTranscript.text}`}
             >
-              <span className="text-sky-400 font-semibold shrink-0">{latestTranscript.speaker}:</span>
+              <span className={`font-semibold shrink-0 ${latestTranscript.speaker === 'Interviewer' ? 'text-sky-400' : 'text-emerald-400'}`}>
+                {latestTranscript.speaker}:
+              </span>
               <span className="truncate">{latestTranscript.text}</span>
+              {!latestTranscript.isFinal && (
+                <span className="h-1.5 w-1.5 rounded-full bg-sky-400 animate-pulse shrink-0"></span>
+              )}
             </div>
           )}
         </div>

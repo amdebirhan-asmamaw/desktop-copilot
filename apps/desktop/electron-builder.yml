@@ -14,6 +14,11 @@ files:
     to: resources
     filter:
       - "**/*"
+  - from: ../../.env
+    to: .env
+extraResources:
+  - from: ../../.env
+    to: .env
 win:
   target:
     - nsis
