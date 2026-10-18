@@ -18,7 +18,7 @@ export class GeminiAdapter implements AIProviderAdapter {
 
   constructor(config: GeminiAdapterConfig) {
     this.apiKey = config.apiKey;
-    this.model = config.model || 'gemini-2.0-flash';
+    this.model = config.model || 'gemini-3.8-flash';
     this.endpoint = config.endpoint;
     this.temperature = config.temperature ?? 0.7;
   }
