@@ -2,7 +2,7 @@ import * as React from 'react';
 import { cn } from '../lib/utils';
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLDivElement> {
-  variant?: 'default' | 'passive' | 'interactive' | 'hidden';
+  variant?: 'default' | 'passive' | 'interactive' | 'hidden' | 'outline' | 'warning';
 }
 
 export const Badge: React.FC<BadgeProps> = ({ className, variant = 'default', children, ...props }) => {
@@ -12,7 +12,9 @@ export const Badge: React.FC<BadgeProps> = ({ className, variant = 'default', ch
     default: 'bg-slate-800 text-slate-300 border border-slate-700',
     passive: 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
     interactive: 'bg-blue-500/15 text-blue-400 border border-blue-500/30',
-    hidden: 'bg-slate-700/30 text-slate-400 border border-slate-700/40'
+    hidden: 'bg-slate-700/30 text-slate-400 border border-slate-700/40',
+    outline: 'bg-transparent text-slate-300 border border-slate-700',
+    warning: 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
   };
 
   return (
