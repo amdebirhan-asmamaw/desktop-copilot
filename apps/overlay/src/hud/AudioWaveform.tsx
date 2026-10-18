@@ -2,38 +2,52 @@ import React, { useEffect, useState } from 'react';
 
 interface AudioWaveformProps {
   active: boolean;
+  levels?: number[];
   className?: string;
 }
 
-export const AudioWaveform: React.FC<AudioWaveformProps> = ({ active, className = '' }) => {
-  const [levels, setLevels] = useState<number[]>([4, 6, 8, 5, 7, 4]);
+export const AudioWaveform: React.FC<AudioWaveformProps> = ({ active, levels: externalLevels, className = '' }) => {
+  const [internalLevels, setInternalLevels] = useState<number[]>([2, 2, 2, 2, 2, 2]);
 
   useEffect(() => {
     if (!active) {
-      setLevels([2, 2, 2, 2, 2, 2]);
+      setInternalLevels([2, 2, 2, 2, 2, 2]);
       return;
     }
 
-    const interval = setInterval(() => {
-      setLevels((prev) =>
-        prev.map(() => Math.floor(Math.random() * 12) + 3)
-      );
-    }, 90);
+    if (externalLevels && externalLevels.length >= 6) {
+      setInternalLevels(externalLevels.slice(0, 6).map((v) => Math.max(2, Math.min(16, Math.round(v * 16)))));
+      return;
+    }
 
-    return () => clearInterval(interval);
-  }, [active]);
+    // Subscribe to IPC audio level events if available
+    const api = (window as unknown as { copilotApi?: { onAudioLevels?: (cb: (levels: number[]) => void) => () => void } }).copilotApi;
+    const unsub = api?.onAudioLevels?.((levels) => {
+      if (levels && levels.length >= 6) {
+        setInternalLevels(levels.slice(0, 6).map((v) => Math.max(2, Math.min(16, Math.round(v * 16)))));
+      }
+    });
+
+    return () => unsub?.();
+  }, [active, externalLevels]);
+
+  const isSpeaking = active && internalLevels.some((l) => l > 3);
 
   return (
     <div
-      className={`flex items-center gap-[2.5px] px-1.5 py-1 rounded bg-slate-900/60 border border-slate-700/50 ${className}`}
-      title={active ? 'Microphone Active' : 'Microphone Muted'}
+      className={`flex items-center gap-[2.5px] px-1.5 py-1 rounded-lg bg-slate-900/60 border transition-all ${
+        isSpeaking ? 'border-emerald-500/40 shadow-sm shadow-emerald-500/20' : 'border-slate-800/60'
+      } ${className}`}
+      title={active ? (isSpeaking ? 'Voice Detected (Listening)' : 'Microphone Ready (Silent)') : 'Microphone Paused'}
     >
-      {levels.map((lvl, idx) => (
+      {internalLevels.map((lvl, idx) => (
         <span
           key={idx}
           className={`w-[2.5px] rounded-full transition-all duration-75 ${
             active
-              ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]'
+              ? isSpeaking
+                ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]'
+                : 'bg-emerald-500/40'
               : 'bg-slate-600'
           }`}
           style={{ height: `${lvl}px` }}

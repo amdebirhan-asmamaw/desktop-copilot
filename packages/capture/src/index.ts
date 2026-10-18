@@ -3,3 +3,5 @@ export * from './adapter';
 export * from './vad/vad-chunker';
 export * from './windows/windows-capture-adapter';
 export * from './screen/screen-grabber';
+export * from './audio/wav-encoder';
+export * from './audio/stream-manager';

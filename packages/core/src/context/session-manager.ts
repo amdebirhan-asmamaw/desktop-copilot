@@ -71,7 +71,8 @@ export class SessionManager {
       id: `snap_${Date.now()}`,
       timestamp: Date.now(),
       sourceTitle: snapshot.sourceTitle,
-      ocrSummary: snapshot.ocrSummary
+      ocrSummary: snapshot.ocrSummary,
+      base64Jpeg: snapshot.base64Jpeg
     };
 
     session.recentSnapshots.push(ref);

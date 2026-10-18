@@ -56,6 +56,19 @@ export class GeminiAdapter implements AIProviderAdapter {
 
     const systemInstruction = buildInterviewSystemPrompt(payload);
 
+    const contentParts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [
+      { text: `Question: ${question}` }
+    ];
+
+    if (payload?.latestSnapshot?.base64Jpeg) {
+      contentParts.push({
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: payload.latestSnapshot.base64Jpeg
+        }
+      });
+    }
+
     const requestBody = {
       systemInstruction: {
         parts: [{ text: systemInstruction }]
@@ -63,7 +76,7 @@ export class GeminiAdapter implements AIProviderAdapter {
       contents: [
         {
           role: 'user',
-          parts: [{ text: `Question: ${question}` }]
+          parts: contentParts
         }
       ],
       generationConfig: {

@@ -17,6 +17,7 @@ export interface SnapshotReference {
   timestamp: number;
   sourceTitle?: string;
   ocrSummary?: string;
+  base64Jpeg?: string;
 }
 
 export interface ActiveSources {

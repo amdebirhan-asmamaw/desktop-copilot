@@ -6,11 +6,26 @@ files:
   - dist/**/*
   - node_modules/**/*
   - package.json
+  - from: ../overlay/dist
+    to: overlay
+    filter:
+      - "**/*"
+  - from: resources
+    to: resources
+    filter:
+      - "**/*"
 win:
   target:
     - nsis
     - portable
+  icon: resources/icon.ico
 nsis:
-  oneClick: true
+  oneClick: false
   perMachine: false
-  allowToChangeInstallationDirectory: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Desktop Copilot
+  uninstallDisplayName: Desktop Copilot
+  deleteAppDataOnUninstall: false
+  runAfterFinish: true

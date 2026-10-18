@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Button, Card, Dialog } from '@repo/ui';
 import { AudioWaveform } from './AudioWaveform';
 import { MarkdownRenderer } from '../ghost/MarkdownRenderer';
+import { MicIcon, ScreenIcon, DropletIcon, EyeIcon, GearIcon, SparklesIcon, StopIcon, RetryIcon } from './Icons';
 
 interface CopilotApiBridge {
   onOverlayModeChanged?: (cb: (m: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => void) => () => void;
@@ -19,10 +20,121 @@ interface CopilotApiBridge {
   onAdjustOpacity?: (cb: (delta: number) => void) => () => void;
   setWindowOpacity?: (opacity: number) => Promise<void>;
   toggleVisibility?: () => Promise<void>;
+  retryQuestion?: (question?: string) => Promise<void>;
+  onAudioLevels?: (cb: (levels: number[]) => void) => () => void;
+  feedAudioPcm?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void;
+  getSystemAudioSourceId?: () => Promise<string | null>;
   onGhostStreamStart?: (cb: (data: { requestId: string; question: string; isDemo?: boolean }) => void) => () => void;
   onGhostStreamChunk?: (cb: (data: { requestId: string; text: string }) => void) => () => void;
   onGhostStreamEnd?: (cb: (data: { requestId: string; fullAnswer?: string }) => void) => () => void;
-  onGhostStreamError?: (cb: (data: { requestId: string; error: { code: string; message: string } }) => void) => () => void;
+  onGhostStreamError?: (cb: (data: { requestId: string; question?: string; error: { code: string; message: string } }) => void) => () => void;
+}
+
+function downsamplePcm(input: Float32Array, fromRate: number, toRate: number = 16000): Float32Array {
+  if (fromRate === toRate || input.length === 0) return input;
+  const ratio = fromRate / toRate;
+  const newLen = Math.round(input.length / ratio);
+  const output = new Float32Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const idx = Math.min(Math.floor(i * ratio), input.length - 1);
+    output[i] = input[idx]!;
+  }
+  return output;
+}
+
+function setupStreamProcessor(
+  stream: MediaStream,
+  source: 'MICROPHONE' | 'SYSTEM_LOOPBACK',
+  feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void
+): () => void {
+  try {
+    const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const audioCtx = new AudioContextClass({ sampleRate: 16000 });
+    const sourceNode = audioCtx.createMediaStreamSource(stream);
+    const scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+    scriptProcessor.onaudioprocess = (e) => {
+      const raw = e.inputBuffer.getChannelData(0);
+      const pcm = audioCtx.sampleRate !== 16000 ? downsamplePcm(raw, audioCtx.sampleRate, 16000) : new Float32Array(raw);
+      feedPcm(source, pcm);
+    };
+
+    sourceNode.connect(scriptProcessor);
+    scriptProcessor.connect(audioCtx.destination);
+
+    return () => {
+      try {
+        scriptProcessor.disconnect();
+        sourceNode.disconnect();
+        audioCtx.close();
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {}
+    };
+  } catch (err) {
+    console.warn('[FloatingHud] Failed to initialize AudioContext processor:', err);
+    return () => {
+      stream.getTracks().forEach((t) => t.stop());
+    };
+  }
+}
+
+async function startMicrophoneCapture(
+  feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void
+): Promise<(() => void) | null> {
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) return null;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      },
+      video: false
+    });
+    return setupStreamProcessor(stream, 'MICROPHONE', feedPcm);
+  } catch (err) {
+    console.warn('[FloatingHud] Microphone capture unavailable:', err);
+    return null;
+  }
+}
+
+async function startSystemAudioCapture(
+  api: CopilotApiBridge,
+  feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void
+): Promise<(() => void) | null> {
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) return null;
+    const sourceId = await api.getSystemAudioSourceId?.();
+    if (!sourceId) return null;
+
+    // Electron desktop loopback audio capture
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: sourceId
+        }
+      } as unknown as MediaTrackConstraints,
+      video: {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: sourceId,
+          maxFrameRate: 1
+        }
+      } as unknown as MediaTrackConstraints
+    });
+
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      stream.getTracks().forEach((t) => t.stop());
+      return null;
+    }
+
+    return setupStreamProcessor(stream, 'SYSTEM_LOOPBACK', feedPcm);
+  } catch (err) {
+    console.warn('[FloatingHud] System loopback audio capture unavailable:', err);
+    return null;
+  }
 }
 
 export const FloatingHud: React.FC = () => {
@@ -45,7 +157,8 @@ export const FloatingHud: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<{ code: string; message: string } | null>(null);
   const [cardOpacity, setCardOpacity] = useState<number>(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('desktop_copilot_opacity') : null;
-    return saved ? parseFloat(saved) : 0.95;
+    const parsed = saved ? parseFloat(saved) : 0.95;
+    return Math.max(0.70, Math.min(1.0, isNaN(parsed) ? 0.95 : parsed));
   });
   const [copiedQ, setCopiedQ] = useState<boolean>(false);
   const [copiedA, setCopiedA] = useState<boolean>(false);
@@ -99,6 +212,9 @@ export const FloatingHud: React.FC = () => {
     const unsubError = api.onGhostStreamError?.((data) => {
       setAnswerStatus('ERROR');
       setErrorMessage(data.error);
+      if (data.question) {
+        setCurrentQuestion(data.question);
+      }
     });
 
     api.getProviderStatus?.().then((info) => {
@@ -107,7 +223,7 @@ export const FloatingHud: React.FC = () => {
 
     const unsubOpacity = api.onAdjustOpacity?.((delta) => {
       setCardOpacity((prev) => {
-        const next = Math.max(0.15, Math.min(1.0, Math.round((prev + delta) * 100) / 100));
+        const next = Math.max(0.70, Math.min(1.0, Math.round((prev + delta) * 100) / 100));
         localStorage.setItem('desktop_copilot_opacity', String(next));
         api.setWindowOpacity?.(next);
         return next;
@@ -119,7 +235,7 @@ export const FloatingHud: React.FC = () => {
         if (e.key === '[' || e.key === '{') {
           e.preventDefault();
           setCardOpacity((prev) => {
-            const next = Math.max(0.15, Math.min(1.0, Math.round((prev - 0.1) * 100) / 100));
+            const next = Math.max(0.70, Math.min(1.0, Math.round((prev - 0.05) * 100) / 100));
             localStorage.setItem('desktop_copilot_opacity', String(next));
             api.setWindowOpacity?.(next);
             return next;
@@ -127,7 +243,7 @@ export const FloatingHud: React.FC = () => {
         } else if (e.key === ']' || e.key === '}') {
           e.preventDefault();
           setCardOpacity((prev) => {
-            const next = Math.max(0.15, Math.min(1.0, Math.round((prev + 0.1) * 100) / 100));
+            const next = Math.max(0.70, Math.min(1.0, Math.round((prev + 0.05) * 100) / 100));
             localStorage.setItem('desktop_copilot_opacity', String(next));
             api.setWindowOpacity?.(next);
             return next;
@@ -152,8 +268,58 @@ export const FloatingHud: React.FC = () => {
     };
   }, []);
 
+  // Real Microphone Stream Capture
+  useEffect(() => {
+    if (!micActive) return;
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (!api?.feedAudioPcm) return;
+
+    let cleanupFn: (() => void) | null = null;
+    let isCancelled = false;
+
+    startMicrophoneCapture((source, pcm) => {
+      api.feedAudioPcm?.(source, pcm);
+    }).then((cleanup) => {
+      if (isCancelled) {
+        cleanup?.();
+      } else {
+        cleanupFn = cleanup;
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+      cleanupFn?.();
+    };
+  }, [micActive]);
+
+  // Real System Audio Loopback Capture
+  useEffect(() => {
+    if (!screenActive) return;
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (!api?.feedAudioPcm || !api?.getSystemAudioSourceId) return;
+
+    let cleanupFn: (() => void) | null = null;
+    let isCancelled = false;
+
+    startSystemAudioCapture(api, (source, pcm) => {
+      api.feedAudioPcm?.(source, pcm);
+    }).then((cleanup) => {
+      if (isCancelled) {
+        cleanup?.();
+      } else {
+        cleanupFn = cleanup;
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+      cleanupFn?.();
+    };
+  }, [screenActive]);
+
   const updateOpacity = (val: number) => {
-    const clamped = Math.max(0.15, Math.min(1.0, Math.round(val * 100) / 100));
+    const clamped = Math.max(0.70, Math.min(1.0, Math.round(val * 100) / 100));
     setCardOpacity(clamped);
     localStorage.setItem('desktop_copilot_opacity', String(clamped));
     const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
@@ -314,6 +480,23 @@ export const FloatingHud: React.FC = () => {
     await api?.cancelActiveRequest?.();
   };
 
+  const handleRetry = async () => {
+    if (!currentQuestion) return;
+    setAnswerStatus('STREAMING');
+    setErrorMessage(null);
+    setStreamedText('');
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (api?.retryQuestion) {
+      await api.retryQuestion(currentQuestion);
+    } else if (api?.feedTranscript) {
+      await api.feedTranscript({
+        speaker: 'REMOTE_SPEAKER',
+        text: currentQuestion,
+        isFinal: true
+      });
+    }
+  };
+
   const handleDismissAnswer = () => {
     setAnswerStatus('IDLE');
     setStreamedText('');
@@ -404,34 +587,34 @@ export const FloatingHud: React.FC = () => {
             className="flex items-center gap-2 app-no-drag"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           >
-            {/* Segmented Media Controls (Mic & Screen) */}
-            <div className="flex items-center bg-slate-900/60 p-0.5 rounded-lg border border-white/10">
+            {/* Segmented Media Controls (Mic & Screen) - Icons Only */}
+            <div className="flex items-center bg-slate-900/70 p-0.5 rounded-lg border border-white/10 gap-0.5 shadow-inner">
               <button
                 type="button"
                 onClick={() => setMicActive(!micActive)}
-                className={`h-6 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 ${
+                className={`h-7 w-7 rounded-md transition-all flex items-center justify-center select-none ${
                   micActive
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-400/30'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 shadow-sm shadow-emerald-500/20'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border border-transparent'
                 }`}
+                aria-label={micActive ? 'Mute microphone' : 'Unmute microphone'}
                 title={micActive ? 'Microphone Active (Click to mute)' : 'Microphone Muted (Click to unmute)'}
               >
-                <span>{micActive ? '🎙️' : '🔇'}</span>
-                <span className="text-[9.5px] uppercase font-semibold">{micActive ? 'Mic' : 'Muted'}</span>
+                <MicIcon active={micActive} className="w-3.5 h-3.5 transition-transform active:scale-90" />
               </button>
 
               <button
                 type="button"
                 onClick={() => setScreenActive(!screenActive)}
-                className={`h-6 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 ${
+                className={`h-7 w-7 rounded-md transition-all flex items-center justify-center select-none ${
                   screenActive
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-400/30'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-400/40 shadow-sm shadow-sky-500/20'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border border-transparent'
                 }`}
-                title={screenActive ? 'Screen Capture Active' : 'Screen Capture Paused'}
+                aria-label={screenActive ? 'Pause screen capture' : 'Resume screen capture'}
+                title={screenActive ? 'Screen Capture Active (Click to pause)' : 'Screen Capture Paused (Click to resume)'}
               >
-                <span>{screenActive ? '🖥️' : '⏹️'}</span>
-                <span className="text-[9.5px] uppercase font-semibold">{screenActive ? 'Screen' : 'Off'}</span>
+                <ScreenIcon active={screenActive} className="w-3.5 h-3.5 transition-transform active:scale-90" />
               </button>
             </div>
 
@@ -440,10 +623,10 @@ export const FloatingHud: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setShowOpacitySlider(!showOpacitySlider)}
-                className="h-6 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 text-slate-300 hover:text-white hover:bg-white/10"
+                className="h-7 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1.5 text-slate-300 hover:text-white hover:bg-white/10 select-none"
                 title="Adjust Transparency (Ctrl+Shift+[ to dim, Ctrl+Shift+] to brighten)"
               >
-                <span>💧</span>
+                <DropletIcon className="w-3.5 h-3.5 text-sky-400" />
                 <span className="text-[10px] font-mono font-semibold">{Math.round(cardOpacity * 100)}%</span>
               </button>
 
@@ -458,7 +641,7 @@ export const FloatingHud: React.FC = () => {
                   </div>
                   <input
                     type="range"
-                    min="0.15"
+                    min="0.70"
                     max="1"
                     step="0.05"
                     value={cardOpacity}
@@ -468,17 +651,17 @@ export const FloatingHud: React.FC = () => {
                   <div className="flex items-center justify-between gap-1 text-[9px] text-slate-400">
                     <button
                       type="button"
-                      onClick={() => updateOpacity(0.35)}
-                      className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
-                    >
-                      35%
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => updateOpacity(0.70)}
                       className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
                     >
                       70%
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateOpacity(0.85)}
+                      className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
+                    >
+                      85%
                     </button>
                     <button
                       type="button"
@@ -507,10 +690,10 @@ export const FloatingHud: React.FC = () => {
                   isFinal: true
                 });
               }}
-              className="h-7 px-2.5 rounded-lg text-[11px] font-semibold bg-gradient-to-r from-amber-500/20 to-amber-600/20 hover:from-amber-500/30 hover:to-amber-600/30 text-amber-300 border border-amber-400/40 shadow-sm shadow-amber-500/10 transition-all flex items-center gap-1 select-none"
+              className="h-7 px-2.5 rounded-lg text-[11px] font-semibold bg-gradient-to-r from-amber-500/20 to-amber-600/20 hover:from-amber-500/30 hover:to-amber-600/30 text-amber-300 border border-amber-400/40 shadow-sm shadow-amber-500/10 transition-all flex items-center gap-1.5 select-none"
               title="Simulate incoming interviewer question"
             >
-              <span>⚡</span>
+              <SparklesIcon className="w-3.5 h-3.5 text-amber-300" />
               <span>Demo Q&A</span>
             </button>
 
@@ -519,10 +702,10 @@ export const FloatingHud: React.FC = () => {
               <button
                 type="button"
                 onClick={handleCancelActive}
-                className="h-7 px-2 rounded-lg text-[11px] font-medium bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-400/40 transition-all flex items-center gap-1 animate-pulse select-none"
+                className="h-7 px-2 rounded-lg text-[11px] font-medium bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-400/40 transition-all flex items-center gap-1.5 animate-pulse select-none"
                 title="Cancel current generation"
               >
-                <span>⏹</span>
+                <StopIcon className="w-3 h-3 text-rose-300" />
                 <span>Stop</span>
               </button>
             )}
@@ -534,10 +717,10 @@ export const FloatingHud: React.FC = () => {
                 const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
                 await api?.toggleVisibility?.();
               }}
-              className="h-7 px-2 rounded-lg text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center gap-1 text-xs select-none"
+              className="h-7 px-2 rounded-lg text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center gap-1.5 text-xs select-none"
               title="Hide Overlay (Ctrl+Shift+H) - Press Ctrl+Shift+H anywhere to bring it back"
             >
-              <span>👁️</span>
+              <EyeIcon className="w-3.5 h-3.5 text-slate-300" />
               <kbd className="text-[8.5px] font-mono text-slate-400 bg-black/40 px-1 py-0.2 rounded border border-white/10">
                 Ctrl+Shift+H
               </kbd>
@@ -550,7 +733,7 @@ export const FloatingHud: React.FC = () => {
               className="h-7 w-7 rounded-lg text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center justify-center text-xs select-none"
               title="Session Persona & Context"
             >
-              ⚙️
+              <GearIcon className="w-3.5 h-3.5 text-slate-300" />
             </button>
           </div>
         </div>
@@ -612,11 +795,11 @@ export const FloatingHud: React.FC = () => {
                     <span>Opacity:</span>
                     <input
                       type="range"
-                      min="0.3"
+                      min="0.70"
                       max="1"
                       step="0.05"
                       value={cardOpacity}
-                      onChange={(e) => setCardOpacity(parseFloat(e.target.value))}
+                      onChange={(e) => updateOpacity(parseFloat(e.target.value))}
                       className="w-14 h-1 bg-slate-700 rounded-lg cursor-pointer accent-sky-400"
                     />
                     <span className="text-[9.5px] font-mono text-slate-300 w-6">
@@ -681,13 +864,30 @@ export const FloatingHud: React.FC = () => {
                 </div>
               )}
 
-              {/* Error Banner */}
+              {/* Error Banner with Retry Action */}
               {answerStatus === 'ERROR' && errorMessage && (
-                <div className="p-2.5 rounded-xl bg-rose-950/70 border border-rose-500/40 text-rose-200 text-xs">
-                  <div className="font-semibold text-rose-300 mb-0.5">
-                    ⚠️ {errorMessage.code}
+                <div className="p-3.5 rounded-xl bg-gradient-to-br from-rose-950/80 via-slate-950/90 to-slate-900/90 border border-rose-500/40 text-rose-200 text-xs shadow-xl flex flex-col gap-2.5 backdrop-blur-md">
+                  <div className="flex items-center justify-between">
+                    <div className="font-semibold text-rose-300 flex items-center gap-2">
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                      </span>
+                      <span className="text-[11px] font-mono uppercase tracking-wide">{errorMessage.code}</span>
+                    </div>
+                    {currentQuestion && (
+                      <button
+                        type="button"
+                        onClick={handleRetry}
+                        className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-200 hover:text-white border border-rose-400/40 font-medium text-[11px] transition-all flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer select-none"
+                        title="Retry answering this question"
+                      >
+                        <RetryIcon className="w-3.5 h-3.5 text-rose-300" />
+                        <span>Retry Question</span>
+                      </button>
+                    )}
                   </div>
-                  <div>{errorMessage.message}</div>
+                  <div className="text-[11.5px] leading-relaxed text-rose-200/90 break-words">{errorMessage.message}</div>
                 </div>
               )}
 

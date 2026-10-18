@@ -62,6 +62,10 @@ export interface ElectronCopilotApi {
   onAdjustOpacity: (callback: (delta: number) => void) => () => void;
   setWindowOpacity: (opacity: number) => Promise<void>;
   toggleVisibility: () => Promise<void>;
+  retryQuestion: (question?: string) => Promise<void>;
+  onAudioLevels: (callback: (levels: number[]) => void) => () => void;
+  feedAudioPcm: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void;
+  getSystemAudioSourceId: () => Promise<string | null>;
 }
 
 const api: ElectronCopilotApi = {
@@ -116,7 +120,15 @@ const api: ElectronCopilotApi = {
     return () => ipcRenderer.removeListener('hud:adjust-opacity', handler);
   },
   setWindowOpacity: (opacity) => ipcRenderer.invoke('hud:set-opacity', opacity),
-  toggleVisibility: () => ipcRenderer.invoke('overlay:toggle-visibility')
+  toggleVisibility: () => ipcRenderer.invoke('overlay:toggle-visibility'),
+  retryQuestion: (question) => ipcRenderer.invoke('question:retry', question),
+  onAudioLevels: (callback) => {
+    const handler = (_: Electron.IpcRendererEvent, levels: number[]) => callback(levels);
+    ipcRenderer.on('hud:audio-levels', handler);
+    return () => ipcRenderer.removeListener('hud:audio-levels', handler);
+  },
+  feedAudioPcm: (source, pcm) => ipcRenderer.send('audio:feed-pcm', { source, pcm }),
+  getSystemAudioSourceId: () => ipcRenderer.invoke('audio:get-system-source-id')
 };
 
 contextBridge.exposeInMainWorld('copilotApi', api);

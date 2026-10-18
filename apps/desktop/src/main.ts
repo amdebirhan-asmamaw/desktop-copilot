@@ -1,10 +1,10 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, clipboard, Menu } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, clipboard, Menu, session } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHudWindow } from './windows/hud-window.js';
 import { SessionManager, JsonSessionStore, OrchestrationPipeline } from '@repo/core';
-import { createChatProvider, loadAIConfigFromEnv } from '@repo/ai';
-import { validateScreenSnapshot, createBase64DataUrl } from '@repo/capture';
+import { createChatProvider, loadAIConfigFromEnv, ConfigurableSTTService } from '@repo/ai';
+import { validateScreenSnapshot, createBase64DataUrl, DualAudioStreamManager } from '@repo/capture';
 
 // Ensure clean application name and isolated user data directory (avoids scoped package name / Windows cache errors)
 app.setName('desktop-copilot');
@@ -73,28 +73,38 @@ let hudWin: BrowserWindow | null = null;
 let currentMode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN' = 'PASSIVE';
 
 async function resolveRendererUrl(): Promise<string> {
-  const configuredUrl = process.env.RENDERER_URL || 'http://localhost:5173';
-  if (configuredUrl.startsWith('http://') || configuredUrl.startsWith('https://')) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 800);
-      const res = await fetch(configuredUrl, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok || res.status < 500) {
-        return configuredUrl;
-      }
-    } catch {
-      // Live server is not running; fall back to local dist if available
-    }
+  const configuredUrl = process.env.RENDERER_URL;
+  if (configuredUrl) {
+    return configuredUrl;
   }
 
   const localDistIndex = [
+    path.resolve(__dirname, '../overlay/index.html'),
+    path.resolve(__dirname, 'overlay/index.html'),
     path.resolve(__dirname, '../../overlay/dist/index.html'),
     path.resolve(process.cwd(), 'apps/overlay/dist/index.html'),
     path.resolve(process.cwd(), '../overlay/dist/index.html')
   ].find((candidate) => fs.existsSync(candidate));
 
-  return localDistIndex || configuredUrl;
+  if (app.isPackaged && localDistIndex) {
+    return localDistIndex;
+  }
+
+  // In development, probe Vite dev server first
+  const devUrl = 'http://localhost:5173';
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 800);
+    const res = await fetch(devUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (res.ok || res.status < 500) {
+      return devUrl;
+    }
+  } catch {
+    // Live server is not running; fall back to local dist
+  }
+
+  return localDistIndex || devUrl;
 }
 
 const storagePath = path.join(app.getPath('userData'), 'copilot-sessions.json');
@@ -102,10 +112,44 @@ const sessionManager = new SessionManager(new JsonSessionStore(storagePath));
 
 const aiConfig = loadAIConfigFromEnv();
 const chatProvider = createChatProvider(aiConfig);
+const sttService = new ConfigurableSTTService(aiConfig.capabilities.stt);
+const audioManager = new DualAudioStreamManager();
 const pipeline = new OrchestrationPipeline();
+let lastAttemptedQuestion: string = '';
 
-export async function triggerQuestionAnswer(sessionId: string, question: string): Promise<void> {
+async function captureCurrentScreenBase64(): Promise<string | undefined> {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1280, height: 720 }
+    });
+    if (!sources || sources.length === 0) return undefined;
+    const primary = sources[0]!;
+    const jpegBuffer = primary.thumbnail.toJPEG(75);
+    return jpegBuffer.toString('base64');
+  } catch (err) {
+    console.warn('[Screen] Failed to capture screen snapshot for question context:', err);
+    return undefined;
+  }
+}
+
+export async function triggerQuestionAnswer(
+  sessionId: string,
+  question: string,
+  retryAttempt: number = 0
+): Promise<void> {
+  lastAttemptedQuestion = question;
   const activeReq = pipeline.beginRequest(question);
+
+  // Multimodal screen context: Capture active screen snapshot
+  const screenBase64 = await captureCurrentScreenBase64();
+  if (screenBase64) {
+    await sessionManager.addSnapshotRef(sessionId, {
+      sourceTitle: 'Active Screen Display',
+      base64Jpeg: screenBase64
+    });
+  }
+
   const payload = await sessionManager.assembleContextPayload(sessionId);
 
   const startPayload = {
@@ -134,8 +178,22 @@ export async function triggerQuestionAnswer(sessionId: string, question: string)
         };
         hudWin?.webContents.send('ghost:stream-chunk', chunkPayload);
       } else if (event.type === 'error') {
+        const isTransient =
+          event.error.code.includes('429') ||
+          event.error.code.includes('503') ||
+          event.error.code.includes('RATE_LIMIT') ||
+          event.error.code.includes('NETWORK');
+        if (isTransient && retryAttempt < 1 && !activeReq.signal.aborted) {
+          console.warn(`[Orchestrator] Transient error encountered (${event.error.code}), auto-retrying in 1200ms...`);
+          await new Promise((r) => setTimeout(r, 1200));
+          if (!activeReq.signal.aborted) {
+            return triggerQuestionAnswer(sessionId, question, retryAttempt + 1);
+          }
+        }
+
         const errPayload = {
           requestId: activeReq.requestId,
+          question,
           error: event.error
         };
         hudWin?.webContents.send('ghost:stream-error', errPayload);
@@ -156,8 +214,23 @@ export async function triggerQuestionAnswer(sessionId: string, question: string)
   } catch (err: unknown) {
     if (!activeReq.signal.aborted) {
       const message = err instanceof Error ? err.message : String(err);
+      const isTransient =
+        message.includes('429') ||
+        message.includes('503') ||
+        message.includes('fetch') ||
+        message.includes('timeout') ||
+        message.includes('ECONNRESET');
+      if (isTransient && retryAttempt < 1) {
+        console.warn(`[Orchestrator] Caught transient network error, auto-retrying in 1200ms...`);
+        await new Promise((r) => setTimeout(r, 1200));
+        if (!activeReq.signal.aborted) {
+          return triggerQuestionAnswer(sessionId, question, retryAttempt + 1);
+        }
+      }
+
       const errPayload = {
         requestId: activeReq.requestId,
+        question,
         error: { code: 'STREAM_FAILED', message }
       };
       hudWin?.webContents.send('ghost:stream-error', errPayload);
@@ -226,6 +299,14 @@ app.on('second-instance', () => {
 });
 
 app.whenReady().then(async () => {
+  session.defaultSession.setPermissionRequestHandler((_, permission, callback) => {
+    if (permission === 'media') {
+      callback(true);
+      return;
+    }
+    callback(true);
+  });
+
   const targetUrl = await resolveRendererUrl();
   hudWin = createHudWindow(targetUrl);
 
@@ -258,12 +339,12 @@ app.whenReady().then(async () => {
 
   // Global Hotkey 3: Opacity Decrease (Ctrl+Shift+[)
   globalShortcut.register('CommandOrControl+Shift+[', () => {
-    hudWin?.webContents.send('hud:adjust-opacity', -0.1);
+    hudWin?.webContents.send('hud:adjust-opacity', -0.05);
   });
 
   // Global Hotkey 4: Opacity Increase (Ctrl+Shift+])
   globalShortcut.register('CommandOrControl+Shift+]', () => {
-    hudWin?.webContents.send('hud:adjust-opacity', +0.1);
+    hudWin?.webContents.send('hud:adjust-opacity', +0.05);
   });
 
   // Global Hotkey 5: Demo Q&A Trigger (Ctrl+Shift+T)
@@ -302,8 +383,16 @@ app.whenReady().then(async () => {
   ipcMain.handle('overlay:toggle-visibility', () => toggleVisibility());
   ipcMain.handle('hud:set-opacity', (_, opacity: number) => {
     if (!hudWin || hudWin.isDestroyed()) return;
-    const clamped = Math.max(0.15, Math.min(1.0, opacity));
+    const clamped = Math.max(0.70, Math.min(1.0, opacity));
     hudWin.setOpacity(clamped);
+  });
+  ipcMain.handle('question:retry', async (_, question?: string) => {
+    if (activeSessionId) {
+      const q = question || lastAttemptedQuestion;
+      if (q) {
+        await triggerQuestionAnswer(activeSessionId, q);
+      }
+    }
   });
 
   ipcMain.on('overlay:set-ignore-mouse-events', (event, ignore: boolean, options?: { forward: boolean }) => {
@@ -445,6 +534,46 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('session:get', async (_, sessionId: string) => {
     return sessionManager.getSession(sessionId);
+  });
+
+  // Audio Stream & System Loopback IPC Handlers
+  ipcMain.on('audio:feed-pcm', async (_, data: { source: 'MICROPHONE' | 'SYSTEM_LOOPBACK'; pcm: Float32Array | number[] }) => {
+    try {
+      const pcmArray = data.pcm instanceof Float32Array ? data.pcm : new Float32Array(data.pcm);
+      audioManager.processRawPcmChunk(data.source, pcmArray, {
+        onAudioLevels: (levels) => {
+          if (hudWin && !hudWin.isDestroyed()) {
+            hudWin.webContents.send('hud:audio-levels', levels);
+          }
+        },
+        onSpeechSegment: async (segment) => {
+          try {
+            console.log(`[Audio] Detected speech segment from ${segment.source} (${segment.durationMs}ms), transcribing...`);
+            const transcript = await sttService.transcribeWav(segment.wavBuffer, segment.source);
+            if (transcript && transcript.text && transcript.text.trim().length > 0) {
+              console.log(`[STT] ${transcript.speaker}: "${transcript.text}"`);
+              if (activeSessionId) {
+                await handleIncomingTranscript(activeSessionId, transcript.speaker, transcript.text, true);
+              }
+            }
+          } catch (err) {
+            console.error('[STT] Failed to transcribe speech segment:', err);
+          }
+        }
+      });
+    } catch (err) {
+      console.error('[Audio] Error processing PCM chunk in main:', err);
+    }
+  });
+
+  ipcMain.handle('audio:get-system-source-id', async () => {
+    try {
+      const sources = await desktopCapturer.getSources({ types: ['screen'] });
+      return sources[0]?.id || null;
+    } catch (err) {
+      console.warn('[Audio] Failed to get system audio screen source:', err);
+      return null;
+    }
   });
 });
 
