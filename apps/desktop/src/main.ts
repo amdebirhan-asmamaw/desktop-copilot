@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHudWindow } from './windows/hud-window.js';
@@ -263,6 +263,29 @@ app.whenReady().then(async () => {
   // IPC Handlers
   ipcMain.handle('overlay:set-mode', (_, mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => applyOverlayMode(mode));
   ipcMain.handle('overlay:get-mode', () => currentMode);
+
+  ipcMain.handle('hud:set-size', (_, { width, height }: { width: number; height: number }) => {
+    if (!hudWin || hudWin.isDestroyed()) return;
+    const currentBounds = hudWin.getBounds();
+    const targetW = Math.max(300, Math.round(width));
+    const targetH = Math.max(60, Math.round(height));
+
+    const currentDisplay = screen.getDisplayMatching(currentBounds);
+    let newY = currentBounds.y;
+    if (currentDisplay) {
+      const maxY = currentDisplay.workArea.y + currentDisplay.workArea.height - targetH;
+      if (newY > maxY) {
+        newY = Math.max(currentDisplay.workArea.y, maxY);
+      }
+    }
+
+    hudWin.setBounds({
+      x: currentBounds.x,
+      y: newY,
+      width: targetW,
+      height: targetH
+    });
+  });
 
   ipcMain.handle('pipeline:cancel-active', () => {
     const activeId = pipeline.getActiveRequestId();

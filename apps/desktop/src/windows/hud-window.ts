@@ -4,7 +4,7 @@ import * as path from 'path';
 export function createHudWindow(rendererUrl: string): BrowserWindow {
   const win = new BrowserWindow({
     width: 580,
-    height: 135,
+    height: 95,
     frame: false,
     transparent: true,
     alwaysOnTop: true,

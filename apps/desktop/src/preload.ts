@@ -55,6 +55,7 @@ export interface ElectronCopilotApi {
   cancelActiveRequest: () => Promise<void>;
   copyToClipboard: (text: string) => Promise<void>;
   getProviderStatus: () => Promise<{ provider: string; model: string; isDemo: boolean }>;
+  setHudSize: (size: { width: number; height: number }) => Promise<void>;
 }
 
 const api: ElectronCopilotApi = {
@@ -98,7 +99,8 @@ const api: ElectronCopilotApi = {
   copyToClipboard: async (text: string) => {
     clipboard.writeText(text);
   },
-  getProviderStatus: () => ipcRenderer.invoke('provider:status')
+  getProviderStatus: () => ipcRenderer.invoke('provider:status'),
+  setHudSize: (size) => ipcRenderer.invoke('hud:set-size', size)
 };
 
 contextBridge.exposeInMainWorld('copilotApi', api);
