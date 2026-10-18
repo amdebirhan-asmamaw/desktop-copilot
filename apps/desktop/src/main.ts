@@ -1,9 +1,57 @@
 import { app, BrowserWindow, globalShortcut, ipcMain } from 'electron';
+import * as fs from 'fs';
 import * as path from 'path';
 import { createHudWindow } from './windows/hud-window.js';
 import { createGhostOverlayWindow } from './windows/ghost-overlay-window.js';
 import { SessionManager, JsonSessionStore, isQuestionIntent } from '@repo/core';
-import { ConfigurableChatStreamingService } from '@repo/ai';
+import { ConfigurableChatStreamingService, loadAIConfigFromEnv } from '@repo/ai';
+
+// Automatically load .env file if present in workspace root or app directory
+const possibleEnvPaths = [
+  path.resolve(process.cwd(), '.env'),
+  path.resolve(process.cwd(), '../../.env'),
+  path.resolve(__dirname, '../../../../.env'),
+  path.resolve(__dirname, '../../../.env')
+];
+
+function loadEnvFile(filePath: string): boolean {
+  if (!fs.existsSync(filePath)) return false;
+  if (typeof process.loadEnvFile === 'function') {
+    try {
+      process.loadEnvFile(filePath);
+      return true;
+    } catch {
+      // fallback to manual parse if process.loadEnvFile encounters syntax errors
+    }
+  }
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx > 0) {
+        const key = trimmed.slice(0, eqIdx).trim();
+        let val = trimmed.slice(eqIdx + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1);
+        }
+        if (process.env[key] === undefined) {
+          process.env[key] = val;
+        }
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+for (const p of possibleEnvPaths) {
+  if (loadEnvFile(p)) {
+    break;
+  }
+}
 
 let hudWin: BrowserWindow | null = null;
 let ghostWin: BrowserWindow | null = null;
@@ -14,11 +62,8 @@ const rendererUrl = process.env.RENDERER_URL || 'http://localhost:5173';
 const storagePath = path.join(app.getPath('userData'), 'copilot-sessions.json');
 const sessionManager = new SessionManager(new JsonSessionStore(storagePath));
 
-const chatService = new ConfigurableChatStreamingService({
-  provider: 'mock',
-  model: 'custom-streaming-model',
-  apiKey: 'local'
-});
+const aiConfig = loadAIConfigFromEnv();
+const chatService = new ConfigurableChatStreamingService(aiConfig.capabilities.chatStreaming);
 
 export async function handleIncomingTranscript(
   sessionId: string,
@@ -73,18 +118,21 @@ app.whenReady().then(async () => {
   activeSessionId = initialSession.sessionId;
 
   // Global Hotkey 1: Privacy/Panic Hide Toggle (Ctrl+Shift+H)
-  globalShortcut.register('CommandOrControl+Shift+H', () => {
+  const privacyHotkey = process.env.HOTKEY_PRIVACY_TOGGLE || 'CommandOrControl+Shift+H';
+  globalShortcut.register(privacyHotkey, () => {
     applyOverlayMode(currentMode === 'HIDDEN' ? 'PASSIVE' : 'HIDDEN');
   });
 
   // Global Hotkey 2: Passive / Interactive Mode Toggle (Ctrl+Shift+I)
-  globalShortcut.register('CommandOrControl+Shift+I', () => {
+  const interactiveHotkey = process.env.HOTKEY_INTERACTIVE_TOGGLE || 'CommandOrControl+Shift+I';
+  globalShortcut.register(interactiveHotkey, () => {
     if (currentMode === 'HIDDEN') return;
     applyOverlayMode(currentMode === 'PASSIVE' ? 'INTERACTIVE' : 'PASSIVE');
   });
 
   // Global Hotkey 3: Demo Q&A Trigger (Ctrl+Shift+T)
-  globalShortcut.register('CommandOrControl+Shift+T', () => {
+  const demoHotkey = process.env.HOTKEY_DEMO_TRIGGER || 'CommandOrControl+Shift+T';
+  globalShortcut.register(demoHotkey, () => {
     if (activeSessionId) {
       handleIncomingTranscript(
         activeSessionId,
