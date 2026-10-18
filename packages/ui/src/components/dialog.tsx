@@ -35,13 +35,9 @@ export const Dialog: React.FC<DialogProps> = ({
   const content = (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/40 backdrop-blur-xs animate-in fade-in-0 duration-150 [app-region:no-drag]"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) {
-          onOpenChange(false);
-        }
-      }}
     >
       <div
+        onClick={(e) => e.stopPropagation()}
         className={cn(
           "relative w-full max-w-lg bg-slate-950/80 backdrop-blur-2xl border border-white/20 rounded-2xl p-4 shadow-[0_20px_50px_rgba(0,0,0,0.6)] [app-region:no-drag] flex flex-col max-h-[92vh] overflow-hidden text-slate-100",
           className

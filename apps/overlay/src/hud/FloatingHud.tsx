@@ -227,7 +227,11 @@ export const FloatingHud: React.FC = () => {
       title="⚙️ Session Persona & Context"
       description="Set your candidate background and behavioral instructions to guide AI responses."
     >
-      <div className="space-y-3.5 [app-region:no-drag]" onKeyDown={handleFormKeyDown}>
+      <div
+        className="space-y-3.5 [app-region:no-drag]"
+        onKeyDown={handleFormKeyDown}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div>
           <label className="block text-[11px] font-semibold text-slate-200 mb-1">
             Role / Target Persona
