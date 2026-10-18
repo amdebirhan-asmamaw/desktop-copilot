@@ -1,8 +1,7 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, clipboard, Menu } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHudWindow } from './windows/hud-window.js';
-import { createGhostOverlayWindow } from './windows/ghost-overlay-window.js';
 import { SessionManager, JsonSessionStore, OrchestrationPipeline } from '@repo/core';
 import { createChatProvider, loadAIConfigFromEnv } from '@repo/ai';
 import { validateScreenSnapshot, createBase64DataUrl } from '@repo/capture';
@@ -71,7 +70,6 @@ for (const p of possibleEnvPaths) {
 }
 
 let hudWin: BrowserWindow | null = null;
-let ghostWin: BrowserWindow | null = null;
 let currentMode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN' = 'PASSIVE';
 
 async function resolveRendererUrl(): Promise<string> {
@@ -110,11 +108,12 @@ export async function triggerQuestionAnswer(sessionId: string, question: string)
   const activeReq = pipeline.beginRequest(question);
   const payload = await sessionManager.assembleContextPayload(sessionId);
 
-  ghostWin?.webContents.send('ghost:stream-start', {
+  const startPayload = {
     requestId: activeReq.requestId,
     question,
     isDemo: chatProvider.id === 'demo'
-  });
+  };
+  hudWin?.webContents.send('ghost:stream-start', startPayload);
 
   let accumulatedText = '';
 
@@ -129,21 +128,24 @@ export async function triggerQuestionAnswer(sessionId: string, question: string)
 
       if (event.type === 'text-delta') {
         accumulatedText += event.text;
-        ghostWin?.webContents.send('ghost:stream-chunk', {
+        const chunkPayload = {
           requestId: activeReq.requestId,
           text: event.text
-        });
+        };
+        hudWin?.webContents.send('ghost:stream-chunk', chunkPayload);
       } else if (event.type === 'error') {
-        ghostWin?.webContents.send('ghost:stream-error', {
+        const errPayload = {
           requestId: activeReq.requestId,
           error: event.error
-        });
+        };
+        hudWin?.webContents.send('ghost:stream-error', errPayload);
         return;
       } else if (event.type === 'complete') {
-        ghostWin?.webContents.send('ghost:stream-end', {
+        const endPayload = {
           requestId: activeReq.requestId,
           fullAnswer: accumulatedText
-        });
+        };
+        hudWin?.webContents.send('ghost:stream-end', endPayload);
         await sessionManager.appendTranscript(sessionId, {
           speaker: 'ASSISTANT',
           text: accumulatedText
@@ -154,10 +156,11 @@ export async function triggerQuestionAnswer(sessionId: string, question: string)
   } catch (err: unknown) {
     if (!activeReq.signal.aborted) {
       const message = err instanceof Error ? err.message : String(err);
-      ghostWin?.webContents.send('ghost:stream-error', {
+      const errPayload = {
         requestId: activeReq.requestId,
         error: { code: 'STREAM_FAILED', message }
-      });
+      };
+      hudWin?.webContents.send('ghost:stream-error', errPayload);
     }
   }
 }
@@ -190,28 +193,27 @@ export async function handleIncomingTranscript(
 }
 
 export function applyOverlayMode(mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN'): void {
-  if (!ghostWin || ghostWin.isDestroyed()) return;
   currentMode = mode;
 
-  switch (mode) {
-    case 'HIDDEN':
-      ghostWin.hide();
-      break;
-    case 'PASSIVE':
-      ghostWin.showInactive();
-      ghostWin.setIgnoreMouseEvents(true, { forward: true });
-      ghostWin.setFocusable(false);
-      break;
-    case 'INTERACTIVE':
-      ghostWin.show();
-      ghostWin.setIgnoreMouseEvents(false);
-      ghostWin.setFocusable(true);
-      ghostWin.focus();
-      break;
+  if (hudWin && !hudWin.isDestroyed()) {
+    switch (mode) {
+      case 'HIDDEN':
+        hudWin.hide();
+        break;
+      case 'PASSIVE':
+        hudWin.showInactive();
+        hudWin.setIgnoreMouseEvents(true, { forward: true });
+        hudWin.setFocusable(false);
+        break;
+      case 'INTERACTIVE':
+        hudWin.show();
+        hudWin.setIgnoreMouseEvents(false);
+        hudWin.setFocusable(true);
+        hudWin.focus();
+        break;
+    }
+    hudWin.webContents.send('overlay:mode-changed', mode);
   }
-
-  hudWin?.webContents.send('overlay:mode-changed', mode);
-  ghostWin.webContents.send('overlay:mode-changed', mode);
 }
 
 let activeSessionId: string | null = null;
@@ -225,7 +227,6 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   const targetUrl = await resolveRendererUrl();
-  ghostWin = createGhostOverlayWindow(targetUrl);
   hudWin = createHudWindow(targetUrl);
 
   const initialSession = await sessionManager.createSession({
@@ -260,9 +261,56 @@ app.whenReady().then(async () => {
     }
   });
 
+  // Application menu with Edit commands (enables native Ctrl+C / Ctrl+V / Ctrl+A in Windows frameless windows)
+  const editMenuTemplate: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(editMenuTemplate));
+
   // IPC Handlers
   ipcMain.handle('overlay:set-mode', (_, mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => applyOverlayMode(mode));
   ipcMain.handle('overlay:get-mode', () => currentMode);
+
+  ipcMain.on('overlay:set-ignore-mouse-events', (event, ignore: boolean, options?: { forward: boolean }) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win && !win.isDestroyed()) {
+      win.setIgnoreMouseEvents(ignore, options);
+    }
+  });
+
+  // Native Clipboard write handler (OS-level, unconstrained)
+  ipcMain.handle('clipboard:write', (_, text: string) => {
+    try {
+      clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      console.error('clipboard.writeText failed in main:', err);
+      return false;
+    }
+  });
+
+  // Window position handlers for smooth dragging
+  ipcMain.handle('window:set-position', (_, { x, y }: { x: number; y: number }) => {
+    if (!hudWin || hudWin.isDestroyed()) return;
+    hudWin.setPosition(Math.round(x), Math.round(y));
+  });
+
+  ipcMain.handle('window:get-position', () => {
+    if (!hudWin || hudWin.isDestroyed()) return { x: 0, y: 0 };
+    const [x, y] = hudWin.getPosition();
+    return { x, y };
+  });
 
   let hudOriginalY: number | null = null;
 
@@ -312,7 +360,7 @@ app.whenReady().then(async () => {
     const activeId = pipeline.getActiveRequestId();
     if (activeId) {
       pipeline.cancelActive('user_requested');
-      ghostWin?.webContents.send('ghost:stream-cancel', { requestId: activeId });
+      hudWin?.webContents.send('ghost:stream-cancel', { requestId: activeId });
     }
   });
 

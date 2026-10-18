@@ -3,7 +3,7 @@ import * as path from 'path';
 
 export function createHudWindow(rendererUrl: string): BrowserWindow {
   const win = new BrowserWindow({
-    width: 580,
+    width: 640,
     height: 95,
     frame: false,
     transparent: true,

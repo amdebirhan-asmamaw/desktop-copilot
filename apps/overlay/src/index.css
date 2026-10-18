@@ -7,3 +7,28 @@
   --color-ghost-surface: rgba(15, 23, 42, 0.78);
   --color-ghost-interactive: rgba(15, 23, 42, 0.94);
 }
+
+/* Custom sleek scrollbar for overlay cards */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+/* Window drag regions for frameless Electron window */
+.app-drag {
+  -webkit-app-region: drag !important;
+  user-select: none;
+}
+
+.app-no-drag {
+  -webkit-app-region: no-drag !important;
+}

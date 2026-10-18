@@ -53,9 +53,12 @@ export interface ElectronCopilotApi {
     error?: string;
   }>;
   cancelActiveRequest: () => Promise<void>;
-  copyToClipboard: (text: string) => Promise<void>;
+  copyToClipboard: (text: string) => Promise<boolean>;
   getProviderStatus: () => Promise<{ provider: string; model: string; isDemo: boolean }>;
   setHudSize: (size: { width: number; height: number }) => Promise<void>;
+  setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => void;
+  setWindowPosition: (x: number, y: number) => Promise<void>;
+  getWindowPosition: () => Promise<{ x: number; y: number }>;
 }
 
 const api: ElectronCopilotApi = {
@@ -96,11 +99,14 @@ const api: ElectronCopilotApi = {
   feedTranscript: (payload) => ipcRenderer.invoke('session:feed-transcript', payload),
   captureScreenSnapshot: () => ipcRenderer.invoke('screen:capture-snapshot'),
   cancelActiveRequest: () => ipcRenderer.invoke('pipeline:cancel-active'),
-  copyToClipboard: async (text: string) => {
-    clipboard.writeText(text);
-  },
+  copyToClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
   getProviderStatus: () => ipcRenderer.invoke('provider:status'),
-  setHudSize: (size) => ipcRenderer.invoke('hud:set-size', size)
+  setHudSize: (size) => ipcRenderer.invoke('hud:set-size', size),
+  setIgnoreMouseEvents: (ignore, options) => {
+    ipcRenderer.send('overlay:set-ignore-mouse-events', ignore, options);
+  },
+  setWindowPosition: (x, y) => ipcRenderer.invoke('window:set-position', { x, y }),
+  getWindowPosition: () => ipcRenderer.invoke('window:get-position')
 };
 
 contextBridge.exposeInMainWorld('copilotApi', api);
