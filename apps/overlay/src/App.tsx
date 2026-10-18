@@ -3,9 +3,11 @@ import { FloatingHud } from './hud/FloatingHud';
 import { GhostOverlay } from './ghost/GhostOverlay';
 
 export const App: React.FC = () => {
-  const path = typeof window !== 'undefined' ? window.location.pathname : '';
+  const current = typeof window !== 'undefined'
+    ? (window.location.pathname + window.location.hash + window.location.search).toLowerCase()
+    : '';
 
-  if (path.includes('/ghost')) {
+  if (current.includes('ghost')) {
     return <GhostOverlay />;
   }
 

@@ -17,6 +17,10 @@ export function createHudWindow(rendererUrl: string): BrowserWindow {
     }
   });
 
-  win.loadURL(`${rendererUrl}/hud`);
+  if (rendererUrl.startsWith('http://') || rendererUrl.startsWith('https://')) {
+    win.loadURL(`${rendererUrl}/hud`);
+  } else {
+    win.loadFile(rendererUrl, { hash: 'hud' });
+  }
   return win;
 }

@@ -57,7 +57,30 @@ let hudWin: BrowserWindow | null = null;
 let ghostWin: BrowserWindow | null = null;
 let currentMode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN' = 'PASSIVE';
 
-const rendererUrl = process.env.RENDERER_URL || 'http://localhost:5173';
+async function resolveRendererUrl(): Promise<string> {
+  const configuredUrl = process.env.RENDERER_URL || 'http://localhost:5173';
+  if (configuredUrl.startsWith('http://') || configuredUrl.startsWith('https://')) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 800);
+      const res = await fetch(configuredUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok || res.status < 500) {
+        return configuredUrl;
+      }
+    } catch {
+      // Live server is not running; fall back to local dist if available
+    }
+  }
+
+  const localDistIndex = [
+    path.resolve(__dirname, '../../overlay/dist/index.html'),
+    path.resolve(process.cwd(), 'apps/overlay/dist/index.html'),
+    path.resolve(process.cwd(), '../overlay/dist/index.html')
+  ].find((candidate) => fs.existsSync(candidate));
+
+  return localDistIndex || configuredUrl;
+}
 
 const storagePath = path.join(app.getPath('userData'), 'copilot-sessions.json');
 const sessionManager = new SessionManager(new JsonSessionStore(storagePath));
@@ -108,8 +131,9 @@ export function applyOverlayMode(mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN'): vo
 let activeSessionId: string | null = null;
 
 app.whenReady().then(async () => {
-  ghostWin = createGhostOverlayWindow(rendererUrl);
-  hudWin = createHudWindow(rendererUrl);
+  const targetUrl = await resolveRendererUrl();
+  ghostWin = createGhostOverlayWindow(targetUrl);
+  hudWin = createHudWindow(targetUrl);
 
   const initialSession = await sessionManager.createSession({
     roleOrPersona: 'Senior Distributed Systems Architect',

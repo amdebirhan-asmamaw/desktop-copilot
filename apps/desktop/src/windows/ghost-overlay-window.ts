@@ -25,6 +25,10 @@ export function createGhostOverlayWindow(rendererUrl: string): BrowserWindow {
 
   // Start in PASSIVE click-through mode
   win.setIgnoreMouseEvents(true, { forward: true });
-  win.loadURL(`${rendererUrl}/ghost`);
+  if (rendererUrl.startsWith('http://') || rendererUrl.startsWith('https://')) {
+    win.loadURL(`${rendererUrl}/ghost`);
+  } else {
+    win.loadFile(rendererUrl, { hash: 'ghost' });
+  }
   return win;
 }
