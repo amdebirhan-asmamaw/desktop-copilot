@@ -1,144 +1,89 @@
-# Turborepo starter
+# 🚀 Desktop Copilot
 
-This Turborepo starter is maintained by the Turborepo core team.
+> Local-first, low-latency AI desktop assistant with transparent ghost writing, real-time screen reasoning, and voice conversation listening.
 
-## Using this example
+Desktop Copilot runs silently in the background during interviews, meetings, or complex coding sessions. It captures conversation audio, reads your screen context, and streams structured answers directly onto a click-through transparent overlay on top of any active window.
 
-Run the following command:
+---
 
-```sh
-npx create-turbo@latest
+## ⚡ Highlights
+
+- 👻 **Full-Screen Transparent Ghost Overlay**: Streamed answers appear directly on your display with zero window frames and click-through transparency (`PASSIVE` mode).
+- 🎛️ **Floating HUD Pill**: Draggable, always-on-top pill at the top of your screen with quick controls, state indicators, and context configuration.
+- ⌨️ **System-Wide Global Shortcuts**: Instant privacy panic hide (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd>), interactive mode toggle (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd>), and test demo question trigger (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd>).
+- 🎙️ **Dual-Stream Audio Capture**: Captures both microphone (`USER`) and system loopback speaker (`REMOTE_SPEAKER`) with energy-based VAD chunking.
+- 👁️ **Windows DXGI Screen Capture**: Captures desktop displays with low latency and optimal frame encoding.
+- 🧠 **Capability-Based AI Architecture**: Zero hardcoded model names. Switch freely between OpenAI, Google Gemini, Anthropic Claude, Deepgram, or offline mock mode.
+- 📦 **Monorepo Architecture**: Clean Turborepo with pnpm workspaces, TypeScript strict typing, and shared design tokens.
+
+---
+
+## ⌨️ Global Shortcuts
+
+| Shortcut | Action | Description |
+| :--- | :--- | :--- |
+| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd> | **Trigger Demo Q&A** | Streams a technical answer to test ghost overlay rendering and typewriter streaming. |
+| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>I</kbd> | **Passive / Interactive Mode** | Toggles click-through mode off/on to select text, copy answers, or dismiss cards. |
+| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>H</kbd> | **Panic / Privacy Hide** | Instantly hides the overlay from screen and taskbar. Press again to restore. |
+| <kbd>Esc</kbd> | **Exit Interactive Mode** | Returns the overlay to click-through passive mode. |
+
+---
+
+## 🏃 Quick Start
+
+### 1. Prerequisites
+- **Node.js**: `>= 22`
+- **pnpm**: `10.12.1+`
+- **Platform**: Windows 10/11
+
+### 2. Environment Setup
+```powershell
+cp .env.example .env
+```
+*(By default, `.env` runs in offline **Mock Mode** requiring no API keys. Add your `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `ANTHROPIC_API_KEY` for live cloud models).*
+
+### 3. Run the Application
+
+```powershell
+# Run with pre-built overlay bundle
+pnpm --filter @repo/desktop start
 ```
 
-## What's inside?
+### 4. Development Mode (with Live Vite HMR)
+```powershell
+# Terminal 1: Start React overlay server
+pnpm --filter @repo/overlay dev
 
-This Turborepo includes the following packages/apps:
-
-### Apps and Packages
-
-- `docs`: a [Next.js](https://nextjs.org/) app
-- `web`: another [Next.js](https://nextjs.org/) app
-- `@repo/ui`: a stub React component library shared by both `web` and `docs` applications
-- `@repo/eslint-config`: `eslint` configurations (includes `@next/eslint-plugin-next` and `eslint-config-prettier`)
-- `@repo/typescript-config`: `tsconfig.json`s used throughout the monorepo
-
-Each package/app is 100% [TypeScript](https://www.typescriptlang.org/).
-
-### Utilities
-
-This Turborepo has some additional tools already setup for you:
-
-- [TypeScript](https://www.typescriptlang.org/) for static type checking
-- [ESLint](https://eslint.org/) for code linting
-- [Prettier](https://prettier.io) for code formatting
-
-### Build
-
-To build all apps and packages, run the following command:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo build
+# Terminal 2: Start Electron
+pnpm --filter @repo/desktop start
 ```
 
-Without global `turbo`, use pnpm:
+---
 
-```sh
-pnpm build
+## 📂 Repository Structure
+
+```
+desktop-copilot/
+├── apps/
+│   ├── desktop/             # Electron main process (dual-window manager, IPC, global shortcuts)
+│   ├── overlay/             # React 19 + Vite 6 + Tailwind CSS v4 HUD & Ghost Overlay
+│   └── web/                 # Next.js web dashboard
+├── packages/
+│   ├── core/                # Session models, JSON storage, question intent detector
+│   ├── capture/             # Windows DXGI screen capture & VAD dual-audio chunking
+│   ├── ai/                  # Capability-based streaming chat, vision, STT, and env loader
+│   ├── ui/                  # Shared accessible UI primitives (shadcn/ui style)
+│   ├── typescript-config/   # Shared tsconfig bases
+│   └── eslint-config/       # Shared lint configs
+└── docs/
+    ├── USER_GUIDE.md        # Complete user manual, workflows, and operations guide
+    └── superpowers/         # Architecture specs and implementation plans
 ```
 
-You can build a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
+---
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
+## 📖 Complete Documentation
 
-```sh
-turbo build --filter=docs
-```
+For detailed architectural diagrams, session management workflows, capture adapter specs, and troubleshooting guides, see:
 
-Without global `turbo`:
-
-```sh
-pnpm turbo build --filter=docs
-```
-
-### Develop
-
-To develop all apps and packages, run the following command:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo dev
-```
-
-Without global `turbo`, use pnpm:
-
-```sh
-pnpm dev
-```
-
-You can develop a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo dev --filter=web
-```
-
-Without global `turbo`:
-
-```sh
-pnpm turbo dev --filter=web
-```
-
-### Remote Caching
-
-> [!TIP]
-> Vercel Remote Cache is free for all plans. Get started today at [vercel.com](https://vercel.com/signup?utm_source=remote-cache-sdk&utm_campaign=free_remote_cache).
-
-Turborepo can use a technique known as [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching) to share cache artifacts across machines, enabling you to share build caches with your team and CI/CD pipelines.
-
-By default, Turborepo will cache locally. To enable Remote Caching you will need an account with Vercel. If you don't have an account you can [create one](https://vercel.com/signup?utm_source=turborepo-examples), then enter the following commands:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo login
-```
-
-Without global `turbo`:
-
-```sh
-pnpm turbo login
-```
-
-This will authenticate the Turborepo CLI with your [Vercel account](https://vercel.com/docs/concepts/personal-accounts/overview).
-
-Next, you can link your Turborepo to your Remote Cache by running the following command from the root of your Turborepo:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo link
-```
-
-Without global `turbo`:
-
-```sh
-pnpm turbo link
-```
-
-## Useful Links
-
-Learn more about the power of Turborepo:
-
-- [Tasks](https://turborepo.dev/docs/crafting-your-repository/running-tasks)
-- [Caching](https://turborepo.dev/docs/crafting-your-repository/caching)
-- [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching)
-- [Filtering](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters)
-- [Configuration Options](https://turborepo.dev/docs/reference/configuration)
-- [CLI Usage](https://turborepo.dev/docs/reference/command-line-reference)
+👉 [**docs/USER_GUIDE.md**](file:///d:/PROJECTS/__self/desktop-copilot/docs/USER_GUIDE.md)
