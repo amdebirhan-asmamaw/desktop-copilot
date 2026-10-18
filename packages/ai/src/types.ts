@@ -6,6 +6,8 @@ export interface TranscriptEvent {
   isFinal: boolean;
   speaker: 'USER' | 'REMOTE_SPEAKER';
   timestamp: number;
+  audioStartMs?: number;
+  audioEndMs?: number;
 }
 
 export interface STTService {

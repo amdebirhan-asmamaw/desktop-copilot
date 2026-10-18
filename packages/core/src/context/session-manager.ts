@@ -71,7 +71,8 @@ export class SessionManager {
       id: `snap_${Date.now()}`,
       timestamp: Date.now(),
       sourceTitle: snapshot.sourceTitle,
-      ocrSummary: snapshot.ocrSummary
+      ocrSummary: snapshot.ocrSummary,
+      base64Jpeg: snapshot.base64Jpeg
     };
 
     session.recentSnapshots.push(ref);
@@ -95,5 +96,10 @@ export class SessionManager {
       recentTurns,
       latestSnapshot
     };
+  }
+
+  async listSessions(): Promise<ContextSession[]> {
+    const sessions = await this.repository.listAll();
+    return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 }

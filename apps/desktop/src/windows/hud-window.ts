@@ -10,11 +10,23 @@ export function createHudWindow(rendererUrl: string): BrowserWindow {
     alwaysOnTop: true,
     resizable: true,
     skipTaskbar: false,
+    icon: [
+      path.resolve(__dirname, '../resources/icon.ico'),
+      path.resolve(__dirname, '../../resources/icon.ico')
+    ].find((p) => require('fs').existsSync(p)),
     webPreferences: {
       preload: path.join(__dirname, '../preload.js'),
       nodeIntegration: false,
       contextIsolation: true
     }
+  });
+
+  win.webContents.on('did-fail-load', (_, errorCode, errorDescription, validatedURL) => {
+    console.error(`[HUD Window] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+  });
+
+  win.webContents.on('console-message', (_, level, message, line, sourceId) => {
+    console.log(`[HUD Renderer] ${message}`);
   });
 
   if (rendererUrl.startsWith('http://') || rendererUrl.startsWith('https://')) {

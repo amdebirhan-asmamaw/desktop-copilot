@@ -1,13 +1,16 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, clipboard, Menu } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, clipboard, Menu, session, Tray } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHudWindow } from './windows/hud-window.js';
 import { SessionManager, JsonSessionStore, OrchestrationPipeline } from '@repo/core';
-import { createChatProvider, loadAIConfigFromEnv } from '@repo/ai';
-import { validateScreenSnapshot, createBase64DataUrl } from '@repo/capture';
+import { createChatProvider, loadAIConfigFromEnv, ConfigurableSTTService, DeepgramStreamCoordinator } from '@repo/ai';
+import { validateScreenSnapshot, createBase64DataUrl, DualAudioStreamManager, AudioCaptureDiagnostics, TranscriptReconciler } from '@repo/capture';
 
 // Ensure clean application name and isolated user data directory (avoids scoped package name / Windows cache errors)
 app.setName('desktop-copilot');
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('enable-features', 'WebAudioBypassOutputBuffering');
+
 const appDataRoot = app.getPath('appData');
 const userDataDir = path.join(appDataRoot, 'desktop-copilot');
 if (!fs.existsSync(userDataDir)) {
@@ -18,17 +21,26 @@ app.setPath('userData', userDataDir);
 // Prevent multiple simultaneous Electron instances from colliding on Chromium disk cache
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
+  console.log('[App] Desktop Copilot is already running. Focused existing window.');
   app.quit();
   process.exit(0);
 }
 
-// Automatically load .env file if present in workspace root or app directory
+// Automatically load .env file if present in packaged resources, app bundle, workspace root, or user data
 const possibleEnvPaths = [
+  // 1. Packaged extraResources path (next to app.asar in resources/.env)
+  process.resourcesPath ? path.join(process.resourcesPath, '.env') : '',
+  // 2. Bundled inside app.asar (root of app)
+  path.resolve(__dirname, '../.env'),
+  path.resolve(__dirname, '.env'),
+  // 3. Application user data directory
+  path.join(userDataDir, '.env'),
+  // 4. Local workspace root and current working directory
   path.resolve(process.cwd(), '.env'),
   path.resolve(process.cwd(), '../../.env'),
   path.resolve(__dirname, '../../../../.env'),
   path.resolve(__dirname, '../../../.env')
-];
+].filter(Boolean);
 
 function loadEnvFile(filePath: string): boolean {
   if (!fs.existsSync(filePath)) return false;
@@ -73,28 +85,36 @@ let hudWin: BrowserWindow | null = null;
 let currentMode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN' = 'PASSIVE';
 
 async function resolveRendererUrl(): Promise<string> {
-  const configuredUrl = process.env.RENDERER_URL || 'http://localhost:5173';
-  if (configuredUrl.startsWith('http://') || configuredUrl.startsWith('https://')) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 800);
-      const res = await fetch(configuredUrl, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok || res.status < 500) {
-        return configuredUrl;
-      }
-    } catch {
-      // Live server is not running; fall back to local dist if available
-    }
-  }
-
   const localDistIndex = [
+    path.resolve(__dirname, '../overlay/index.html'),
+    path.resolve(__dirname, 'overlay/index.html'),
     path.resolve(__dirname, '../../overlay/dist/index.html'),
     path.resolve(process.cwd(), 'apps/overlay/dist/index.html'),
     path.resolve(process.cwd(), '../overlay/dist/index.html')
   ].find((candidate) => fs.existsSync(candidate));
 
-  return localDistIndex || configuredUrl;
+  // In packaged app, always load the bundled local production build
+  if (app.isPackaged && localDistIndex) {
+    return localDistIndex;
+  }
+
+  // Check if a dev server is configured and reachable
+  const devUrl = process.env.RENDERER_URL || 'http://localhost:5173';
+  if (devUrl.startsWith('http://') || devUrl.startsWith('https://')) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 600);
+      const res = await fetch(devUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok || res.status < 500) {
+        return devUrl;
+      }
+    } catch {
+      // Dev server is not running; fall back to compiled local overlay
+    }
+  }
+
+  return localDistIndex || devUrl;
 }
 
 const storagePath = path.join(app.getPath('userData'), 'copilot-sessions.json');
@@ -102,10 +122,78 @@ const sessionManager = new SessionManager(new JsonSessionStore(storagePath));
 
 const aiConfig = loadAIConfigFromEnv();
 const chatProvider = createChatProvider(aiConfig);
+const sttService = new ConfigurableSTTService(aiConfig.capabilities.stt);
+const audioManager = new DualAudioStreamManager();
+const captureDiagnostics = new AudioCaptureDiagnostics();
+const transcriptReconciler = new TranscriptReconciler();
 const pipeline = new OrchestrationPipeline();
+let lastAttemptedQuestion: string = '';
 
-export async function triggerQuestionAnswer(sessionId: string, question: string): Promise<void> {
+const deepgramCoordinator = (aiConfig.capabilities.stt.provider === 'deepgram' && aiConfig.capabilities.stt.apiKey && aiConfig.capabilities.stt.apiKey !== 'local')
+  ? new DeepgramStreamCoordinator({
+      apiKey: aiConfig.capabilities.stt.apiKey,
+      model: aiConfig.capabilities.stt.model || 'nova-2',
+      onInterim: (text: string, speaker: 'USER' | 'REMOTE_SPEAKER') => {
+        if (hudWin && !hudWin.isDestroyed()) {
+          hudWin.webContents.send('transcript:event', {
+            speaker,
+            text,
+            isFinal: false,
+            timestamp: Date.now()
+          });
+        }
+      },
+      onFinalUtterance: (event: { speaker: 'USER' | 'REMOTE_SPEAKER'; text: string }) => {
+        if (activeSessionId) {
+          handleIncomingTranscript(activeSessionId, event.speaker, event.text, true);
+        }
+      },
+      onError: (err: Error) => {
+        console.warn('[Deepgram] Streaming error:', err.message);
+      }
+    })
+  : null;
+
+if (deepgramCoordinator) {
+  deepgramCoordinator.connect();
+}
+
+async function captureCurrentScreenBase64(): Promise<string | undefined> {
+  try {
+    const cursorPos = screen.getCursorScreenPoint();
+    const activeDisplay = screen.getDisplayNearestPoint(cursorPos);
+
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1280, height: 720 }
+    });
+    if (!sources || sources.length === 0) return undefined;
+
+    const targetSource = sources.find((s) => s.display_id === String(activeDisplay.id)) || sources[0]!;
+    const jpegBuffer = targetSource.thumbnail.toJPEG(75);
+    return jpegBuffer.toString('base64');
+  } catch (err) {
+    console.warn('[Screen] Failed to capture screen snapshot for question context:', err);
+    return undefined;
+  }
+}
+
+export async function triggerQuestionAnswer(
+  sessionId: string,
+  question: string
+): Promise<void> {
+  lastAttemptedQuestion = question;
   const activeReq = pipeline.beginRequest(question);
+
+  // Multimodal screen context: Capture active screen snapshot
+  const screenBase64 = await captureCurrentScreenBase64();
+  if (screenBase64) {
+    await sessionManager.addSnapshotRef(sessionId, {
+      sourceTitle: 'Active Screen Display',
+      base64Jpeg: screenBase64
+    });
+  }
+
   const payload = await sessionManager.assembleContextPayload(sessionId);
 
   const startPayload = {
@@ -136,6 +224,7 @@ export async function triggerQuestionAnswer(sessionId: string, question: string)
       } else if (event.type === 'error') {
         const errPayload = {
           requestId: activeReq.requestId,
+          question,
           error: event.error
         };
         hudWin?.webContents.send('ghost:stream-error', errPayload);
@@ -158,6 +247,7 @@ export async function triggerQuestionAnswer(sessionId: string, question: string)
       const message = err instanceof Error ? err.message : String(err);
       const errPayload = {
         requestId: activeReq.requestId,
+        question,
         error: { code: 'STREAM_FAILED', message }
       };
       hudWin?.webContents.send('ghost:stream-error', errPayload);
@@ -169,8 +259,21 @@ export async function handleIncomingTranscript(
   sessionId: string,
   speaker: 'USER' | 'REMOTE_SPEAKER',
   text: string,
-  isFinal: boolean = true
+  isFinal: boolean = true,
+  audioStartMs?: number,
+  audioEndMs?: number
 ): Promise<void> {
+  const start = audioStartMs ?? Date.now();
+  const end = audioEndMs ?? Date.now();
+
+  const reconciled = transcriptReconciler.processTranscript(speaker, text, start, end);
+  if (reconciled.isProbableEcho) {
+    console.log(`[STT] Reconciled acoustic speaker echo on mic: "${text}" (discarded duplicate turn)`);
+    return;
+  }
+
+  console.log(`[STT] ${speaker}: "${text}"`);
+
   hudWin?.webContents.send('transcript:event', {
     speaker,
     text,
@@ -190,6 +293,47 @@ export async function handleIncomingTranscript(
   if (decision.shouldTriggerAnswer && decision.question) {
     await triggerQuestionAnswer(sessionId, decision.question);
   }
+}
+
+let appTray: Tray | null = null;
+let previousModeBeforeHide: 'PASSIVE' | 'INTERACTIVE' = 'INTERACTIVE';
+
+export function toggleVisibility(): void {
+  if (currentMode === 'HIDDEN') {
+    applyOverlayMode(previousModeBeforeHide);
+  } else {
+    previousModeBeforeHide = currentMode === 'PASSIVE' ? 'PASSIVE' : 'INTERACTIVE';
+    applyOverlayMode('HIDDEN');
+  }
+}
+
+export function refreshTrayMenu(): void {
+  if (!appTray) return;
+  const isHidden = currentMode === 'HIDDEN';
+  const menu = Menu.buildFromTemplate([
+    {
+      label: isHidden ? 'Show Desktop Copilot' : 'Hide Desktop Copilot',
+      accelerator: 'CommandOrControl+Shift+H',
+      click: () => toggleVisibility()
+    },
+    {
+      label: currentMode === 'INTERACTIVE' ? 'Switch to Passive Mode (Click-Through)' : 'Switch to Interactive Mode',
+      accelerator: 'CommandOrControl+Shift+I',
+      click: () => {
+        if (currentMode !== 'HIDDEN') {
+          applyOverlayMode(currentMode === 'PASSIVE' ? 'INTERACTIVE' : 'PASSIVE');
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Exit Desktop Copilot',
+      click: () => {
+        app.quit();
+      }
+    }
+  ]);
+  appTray.setContextMenu(menu);
 }
 
 export function applyOverlayMode(mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN'): void {
@@ -214,20 +358,62 @@ export function applyOverlayMode(mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN'): vo
     }
     hudWin.webContents.send('overlay:mode-changed', mode);
   }
+  refreshTrayMenu();
 }
 
 let activeSessionId: string | null = null;
 
 app.on('second-instance', () => {
   if (hudWin && !hudWin.isDestroyed()) {
+    applyOverlayMode('INTERACTIVE');
     if (hudWin.isMinimized()) hudWin.restore();
+    hudWin.show();
     hudWin.focus();
   }
 });
 
 app.whenReady().then(async () => {
+  session.defaultSession.setPermissionRequestHandler((_, permission, callback) => {
+    callback(true);
+  });
+  session.defaultSession.setPermissionCheckHandler(() => true);
+  session.defaultSession.setDevicePermissionHandler(() => true);
+  session.defaultSession.setDisplayMediaRequestHandler((_, callback) => {
+    desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+      const primary = sources[0];
+      if (primary) {
+        callback({ video: primary, audio: 'loopback' });
+      } else {
+        callback({});
+      }
+    }).catch((err) => {
+      console.warn('[DisplayMedia] Failed to get desktop sources:', err);
+      callback({});
+    });
+  });
+
   const targetUrl = await resolveRendererUrl();
   hudWin = createHudWindow(targetUrl);
+
+  // Setup Windows System Tray
+  const iconCandidates = [
+    path.resolve(__dirname, '../resources/icon.ico'),
+    path.resolve(__dirname, '../../resources/icon.ico'),
+    path.resolve(process.cwd(), 'resources/icon.ico'),
+    path.resolve(process.cwd(), 'apps/desktop/resources/icon.ico')
+  ];
+  const trayIconPath = iconCandidates.find((p) => fs.existsSync(p));
+  if (trayIconPath) {
+    try {
+      appTray = new Tray(trayIconPath);
+      appTray.setToolTip('Desktop Copilot');
+      refreshTrayMenu();
+      appTray.on('double-click', () => toggleVisibility());
+      appTray.on('click', () => toggleVisibility());
+    } catch (err) {
+      console.warn('[Tray] Failed to initialize system tray:', err);
+    }
+  }
 
   const initialSession = await sessionManager.createSession({
     roleOrPersona: 'Senior Distributed Systems Architect',
@@ -236,16 +422,6 @@ app.whenReady().then(async () => {
   activeSessionId = initialSession.sessionId;
 
   // Global Hotkey 1: Privacy/Hide Toggle (Ctrl+Shift+H) - remembers previous mode
-  let previousModeBeforeHide: 'PASSIVE' | 'INTERACTIVE' = 'INTERACTIVE';
-  const toggleVisibility = () => {
-    if (currentMode === 'HIDDEN') {
-      applyOverlayMode(previousModeBeforeHide);
-    } else {
-      previousModeBeforeHide = currentMode === 'PASSIVE' ? 'PASSIVE' : 'INTERACTIVE';
-      applyOverlayMode('HIDDEN');
-    }
-  };
-
   const privacyHotkey = process.env.HOTKEY_PRIVACY_TOGGLE || 'CommandOrControl+Shift+H';
   globalShortcut.register(privacyHotkey, toggleVisibility);
 
@@ -258,26 +434,14 @@ app.whenReady().then(async () => {
 
   // Global Hotkey 3: Opacity Decrease (Ctrl+Shift+[)
   globalShortcut.register('CommandOrControl+Shift+[', () => {
-    hudWin?.webContents.send('hud:adjust-opacity', -0.1);
+    hudWin?.webContents.send('hud:adjust-opacity', -0.05);
   });
 
   // Global Hotkey 4: Opacity Increase (Ctrl+Shift+])
   globalShortcut.register('CommandOrControl+Shift+]', () => {
-    hudWin?.webContents.send('hud:adjust-opacity', +0.1);
+    hudWin?.webContents.send('hud:adjust-opacity', +0.05);
   });
 
-  // Global Hotkey 5: Demo Q&A Trigger (Ctrl+Shift+T)
-  const demoHotkey = process.env.HOTKEY_DEMO_TRIGGER || 'CommandOrControl+Shift+T';
-  globalShortcut.register(demoHotkey, () => {
-    if (activeSessionId) {
-      handleIncomingTranscript(
-        activeSessionId,
-        'REMOTE_SPEAKER',
-        'How do you handle network partitions and split-brain scenarios in a distributed cluster?',
-        true
-      );
-    }
-  });
 
   // Application menu with Edit commands (enables native Ctrl+C / Ctrl+V / Ctrl+A in Windows frameless windows)
   const editMenuTemplate: Electron.MenuItemConstructorOptions[] = [
@@ -300,10 +464,24 @@ app.whenReady().then(async () => {
   ipcMain.handle('overlay:set-mode', (_, mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => applyOverlayMode(mode));
   ipcMain.handle('overlay:get-mode', () => currentMode);
   ipcMain.handle('overlay:toggle-visibility', () => toggleVisibility());
+  ipcMain.handle('app:quit', () => {
+    app.quit();
+  });
+  ipcMain.handle('app:minimize', () => {
+    toggleVisibility();
+  });
   ipcMain.handle('hud:set-opacity', (_, opacity: number) => {
     if (!hudWin || hudWin.isDestroyed()) return;
-    const clamped = Math.max(0.15, Math.min(1.0, opacity));
+    const clamped = Math.max(0.70, Math.min(1.0, opacity));
     hudWin.setOpacity(clamped);
+  });
+  ipcMain.handle('question:retry', async (_, question?: string) => {
+    if (activeSessionId) {
+      const q = question || lastAttemptedQuestion;
+      if (q) {
+        await triggerQuestionAnswer(activeSessionId, q);
+      }
+    }
   });
 
   ipcMain.on('overlay:set-ignore-mouse-events', (event, ignore: boolean, options?: { forward: boolean }) => {
@@ -443,8 +621,118 @@ app.whenReady().then(async () => {
     return sess;
   });
 
-  ipcMain.handle('session:get', async (_, sessionId: string) => {
-    return sessionManager.getSession(sessionId);
+  ipcMain.handle('session:get', async (_, sessionId?: string) => {
+    const targetId = sessionId || activeSessionId;
+    if (!targetId) return null;
+    return sessionManager.getSession(targetId);
+  });
+
+  ipcMain.handle('session:list', async () => {
+    return sessionManager.listSessions();
+  });
+
+  ipcMain.handle('session:switch', async (_, sessionId: string) => {
+    const sess = await sessionManager.getSession(sessionId);
+    if (sess) {
+      activeSessionId = sess.sessionId;
+      return sess;
+    }
+    return null;
+  });
+
+  // Broadcast audio telemetry to HUD every 500ms
+  setInterval(() => {
+    if (hudWin && !hudWin.isDestroyed()) {
+      hudWin.webContents.send('hud:audio-telemetry', captureDiagnostics.getCombinedTelemetry());
+    }
+  }, 500);
+
+  function normalizePcm(raw: unknown): Float32Array {
+    if (raw instanceof Float32Array) return raw;
+    if (raw && typeof raw === 'object') {
+      if ('buffer' in raw && 'byteOffset' in raw && 'byteLength' in raw) {
+        const view = raw as ArrayBufferView;
+        return new Float32Array(view.buffer, view.byteOffset, view.byteLength / 4);
+      }
+    }
+    if (Array.isArray(raw)) return new Float32Array(raw);
+    return new Float32Array(0);
+  }
+
+  // Audio Stream & System Loopback IPC Handlers
+  ipcMain.on('audio:report-health', (_, data: { source: 'MICROPHONE' | 'SYSTEM_LOOPBACK'; health: 'CONNECTED' | 'NO_AUDIO_TRACK' | 'PERMISSION_DENIED' | 'STALLED' }) => {
+    captureDiagnostics.setHealth(data.source, data.health);
+  });
+
+  ipcMain.on('audio:feed-pcm', async (_, data: { source: 'MICROPHONE' | 'SYSTEM_LOOPBACK'; pcm: Float32Array | number[] }) => {
+    try {
+      const pcmArray = normalizePcm(data.pcm);
+      if (pcmArray.length === 0) return;
+      const rms = audioManager.computeRms(pcmArray);
+      captureDiagnostics.recordFrame(data.source, rms);
+
+      // 1. Send to Deepgram streaming coordinator if configured
+      if (deepgramCoordinator) {
+        deepgramCoordinator.feedPcm(data.source, pcmArray);
+      }
+
+      // 2. Waveform audio visualizer & fallback Gemini STT
+      audioManager.processRawPcmChunk(data.source, pcmArray, {
+        onAudioLevels: (levels) => {
+          if (hudWin && !hudWin.isDestroyed()) {
+            hudWin.webContents.send('hud:audio-levels', levels);
+          }
+        },
+        onSpeechStateChange: (source, isSpeaking) => {
+          captureDiagnostics.setSpeechState(source, isSpeaking ? 'SPEAKING' : 'IDLE');
+        },
+        onSpeechSegment: async (segment) => {
+          if (deepgramCoordinator) {
+            // Deepgram already manages real-time utterance endpoints
+            return;
+          }
+          captureDiagnostics.setTranscriptionState(segment.source, 'TRANSCRIBING');
+          try {
+            if (!aiConfig.capabilities.stt.apiKey || aiConfig.capabilities.stt.apiKey === 'local') {
+              captureDiagnostics.setTranscriptionState(segment.source, 'IDLE');
+              return;
+            }
+            const transcript = await sttService.transcribeWav(segment.wavBuffer, segment.source, {
+              audioStartMs: segment.audioStartMs,
+              audioEndMs: segment.audioEndMs
+            });
+            captureDiagnostics.setTranscriptionState(segment.source, 'IDLE');
+            if (transcript && transcript.text && transcript.text.trim().length > 0) {
+              if (activeSessionId) {
+                await handleIncomingTranscript(
+                  activeSessionId,
+                  transcript.speaker,
+                  transcript.text,
+                  true,
+                  transcript.audioStartMs,
+                  transcript.audioEndMs
+                );
+              }
+            }
+          } catch (err) {
+            captureDiagnostics.setTranscriptionState(segment.source, 'ERROR');
+            console.error('[STT] Failed to transcribe speech segment:', err);
+          }
+        }
+      });
+    } catch (err) {
+      console.error('[Audio] Error processing PCM chunk in main:', err);
+    }
+  });
+
+  ipcMain.handle('audio:get-system-source-id', async () => {
+    try {
+      const sources = await desktopCapturer.getSources({ types: ['screen'] });
+      return sources[0]?.id || null;
+    } catch (err) {
+      console.warn('[Audio] Failed to get system audio screen source:', err);
+      return null;
+    }
   });
 });
 

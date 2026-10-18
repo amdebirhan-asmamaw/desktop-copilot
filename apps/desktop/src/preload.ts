@@ -37,8 +37,10 @@ export interface ElectronCopilotApi {
   onGhostStreamEnd: (callback: (data: GhostStreamEndPayload) => void) => () => void;
   onGhostStreamError: (callback: (data: GhostStreamErrorPayload) => void) => () => void;
   onTranscriptEvent: (callback: (data: TranscriptEventPayload) => void) => () => void;
-  createSession: (initialContext: unknown) => Promise<unknown>;
-  getSession: (sessionId: string) => Promise<unknown>;
+  createSession: (initialContext?: unknown) => Promise<unknown>;
+  getSession: (sessionId?: string) => Promise<unknown>;
+  listSessions: () => Promise<any[]>;
+  switchSession: (sessionId: string) => Promise<unknown>;
   feedTranscript: (payload: {
     sessionId?: string;
     speaker: 'USER' | 'REMOTE_SPEAKER';
@@ -62,6 +64,14 @@ export interface ElectronCopilotApi {
   onAdjustOpacity: (callback: (delta: number) => void) => () => void;
   setWindowOpacity: (opacity: number) => Promise<void>;
   toggleVisibility: () => Promise<void>;
+  retryQuestion: (question?: string) => Promise<void>;
+  onAudioLevels: (callback: (levels: number[]) => void) => () => void;
+  onAudioTelemetry?: (callback: (telemetry: any) => void) => () => void;
+  feedAudioPcm: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void;
+  reportAudioHealth?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', health: 'CONNECTED' | 'NO_AUDIO_TRACK' | 'PERMISSION_DENIED' | 'STALLED') => void;
+  getSystemAudioSourceId: () => Promise<string | null>;
+  quitApp: () => Promise<void>;
+  minimizeApp: () => Promise<void>;
 }
 
 const api: ElectronCopilotApi = {
@@ -99,6 +109,8 @@ const api: ElectronCopilotApi = {
   },
   createSession: (initialContext) => ipcRenderer.invoke('session:create', initialContext),
   getSession: (sessionId) => ipcRenderer.invoke('session:get', sessionId),
+  listSessions: () => ipcRenderer.invoke('session:list'),
+  switchSession: (sessionId) => ipcRenderer.invoke('session:switch', sessionId),
   feedTranscript: (payload) => ipcRenderer.invoke('session:feed-transcript', payload),
   captureScreenSnapshot: () => ipcRenderer.invoke('screen:capture-snapshot'),
   cancelActiveRequest: () => ipcRenderer.invoke('pipeline:cancel-active'),
@@ -116,7 +128,23 @@ const api: ElectronCopilotApi = {
     return () => ipcRenderer.removeListener('hud:adjust-opacity', handler);
   },
   setWindowOpacity: (opacity) => ipcRenderer.invoke('hud:set-opacity', opacity),
-  toggleVisibility: () => ipcRenderer.invoke('overlay:toggle-visibility')
+  toggleVisibility: () => ipcRenderer.invoke('overlay:toggle-visibility'),
+  retryQuestion: (question) => ipcRenderer.invoke('question:retry', question),
+  onAudioLevels: (callback) => {
+    const handler = (_: Electron.IpcRendererEvent, levels: number[]) => callback(levels);
+    ipcRenderer.on('hud:audio-levels', handler);
+    return () => ipcRenderer.removeListener('hud:audio-levels', handler);
+  },
+  onAudioTelemetry: (callback: (telemetry: any) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, telemetry: any) => callback(telemetry);
+    ipcRenderer.on('hud:audio-telemetry', handler);
+    return () => ipcRenderer.removeListener('hud:audio-telemetry', handler);
+  },
+  feedAudioPcm: (source, pcm) => ipcRenderer.send('audio:feed-pcm', { source, pcm }),
+  reportAudioHealth: (source, health) => ipcRenderer.send('audio:report-health', { source, health }),
+  getSystemAudioSourceId: () => ipcRenderer.invoke('audio:get-system-source-id'),
+  quitApp: () => ipcRenderer.invoke('app:quit'),
+  minimizeApp: () => ipcRenderer.invoke('app:minimize')
 };
 
 contextBridge.exposeInMainWorld('copilotApi', api);

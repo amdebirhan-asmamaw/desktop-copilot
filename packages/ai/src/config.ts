@@ -37,9 +37,9 @@ export function loadAIConfigFromEnv(env: Record<string, string | undefined> = pr
   const visionModel = env.AI_VISION_MODEL || (visionProvider === 'openai' ? 'gpt-4o' : visionProvider === 'gemini' ? 'gemini-3.8-flash' : visionProvider === 'anthropic' ? 'claude-3-7-sonnet' : 'custom-vision-model');
   const visionApiKey = env.AI_VISION_API_KEY || env.OPENAI_API_KEY || env.GEMINI_API_KEY || env.ANTHROPIC_API_KEY || 'local';
 
-  const sttProvider = env.AI_STT_PROVIDER || (env.DEEPGRAM_API_KEY ? 'deepgram' : env.OPENAI_API_KEY ? 'openai' : 'mock');
-  const sttModel = env.AI_STT_MODEL || (sttProvider === 'deepgram' ? 'nova-2' : sttProvider === 'openai' ? 'whisper-1' : 'custom-stt-model');
-  const sttApiKey = env.AI_STT_API_KEY || env.DEEPGRAM_API_KEY || env.OPENAI_API_KEY || 'local';
+  const sttProvider = env.AI_STT_PROVIDER || (env.GEMINI_API_KEY ? 'gemini' : env.DEEPGRAM_API_KEY ? 'deepgram' : env.OPENAI_API_KEY ? 'openai' : 'mock');
+  const sttModel = env.AI_STT_MODEL || (sttProvider === 'gemini' ? 'gemini-3.8-flash' : sttProvider === 'deepgram' ? 'nova-2' : sttProvider === 'openai' ? 'whisper-1' : 'custom-stt-model');
+  const sttApiKey = env.AI_STT_API_KEY || env.GEMINI_API_KEY || env.DEEPGRAM_API_KEY || env.OPENAI_API_KEY || 'local';
 
   return {
     capabilities: {

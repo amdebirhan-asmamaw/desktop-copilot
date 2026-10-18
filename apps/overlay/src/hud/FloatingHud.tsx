@@ -1,12 +1,95 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button, Card, Dialog } from '@repo/ui';
 import { AudioWaveform } from './AudioWaveform';
 import { MarkdownRenderer } from '../ghost/MarkdownRenderer';
+import { MicIcon, ScreenIcon, DropletIcon, EyeIcon, GearIcon, StopIcon, RetryIcon, CloseIcon, MinimizeIcon, PlusIcon, HistoryIcon } from './Icons';
+import { AudioDiagnosticPill, ChannelTelemetry } from './AudioDiagnosticPill';
+
+export interface SessionConversationItem {
+  id: string;
+  timestamp: number;
+  question: string;
+  answer: string;
+  status: 'STREAMING' | 'COMPLETED' | 'ERROR';
+  error?: { code: string; message: string } | null;
+}
+
+export interface StoredTranscriptTurn {
+  id: string;
+  speaker: 'USER' | 'REMOTE_SPEAKER' | 'ASSISTANT';
+  timestamp: number;
+  text: string;
+}
+
+export interface StoredContextSession {
+  sessionId: string;
+  createdAt: number;
+  updatedAt: number;
+  initialContext?: {
+    roleOrPersona?: string;
+    instructions?: string;
+  };
+  transcripts?: StoredTranscriptTurn[];
+}
+
+function parseTranscriptsToConversations(transcripts: StoredTranscriptTurn[]): SessionConversationItem[] {
+  const items: SessionConversationItem[] = [];
+  let pendingQuestion: StoredTranscriptTurn | null = null;
+
+  for (const turn of transcripts) {
+    if (turn.speaker === 'REMOTE_SPEAKER' || turn.speaker === 'USER') {
+      if (pendingQuestion) {
+        items.push({
+          id: pendingQuestion.id,
+          timestamp: pendingQuestion.timestamp,
+          question: pendingQuestion.text,
+          answer: '',
+          status: 'COMPLETED'
+        });
+      }
+      pendingQuestion = turn;
+    } else if (turn.speaker === 'ASSISTANT') {
+      if (pendingQuestion) {
+        items.push({
+          id: pendingQuestion.id,
+          timestamp: pendingQuestion.timestamp,
+          question: pendingQuestion.text,
+          answer: turn.text,
+          status: 'COMPLETED'
+        });
+        pendingQuestion = null;
+      } else {
+        items.push({
+          id: turn.id,
+          timestamp: turn.timestamp,
+          question: 'AI Guidance',
+          answer: turn.text,
+          status: 'COMPLETED'
+        });
+      }
+    }
+  }
+
+  if (pendingQuestion) {
+    items.push({
+      id: pendingQuestion.id,
+      timestamp: pendingQuestion.timestamp,
+      question: pendingQuestion.text,
+      answer: '',
+      status: 'COMPLETED'
+    });
+  }
+
+  return items;
+}
 
 interface CopilotApiBridge {
   onOverlayModeChanged?: (cb: (m: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => void) => () => void;
   setOverlayMode?: (m: string) => Promise<void>;
   createSession?: (ctx: unknown) => Promise<unknown>;
+  getSession?: (sessionId?: string) => Promise<unknown>;
+  listSessions?: () => Promise<StoredContextSession[]>;
+  switchSession?: (sessionId: string) => Promise<unknown>;
   feedTranscript?: (p: { speaker: 'USER' | 'REMOTE_SPEAKER'; text: string; isFinal?: boolean }) => Promise<void>;
   cancelActiveRequest?: () => Promise<void>;
   getProviderStatus?: () => Promise<{ provider: string; model: string; isDemo: boolean }>;
@@ -19,10 +102,248 @@ interface CopilotApiBridge {
   onAdjustOpacity?: (cb: (delta: number) => void) => () => void;
   setWindowOpacity?: (opacity: number) => Promise<void>;
   toggleVisibility?: () => Promise<void>;
+  retryQuestion?: (question?: string) => Promise<void>;
+  onAudioLevels?: (cb: (levels: number[]) => void) => () => void;
+  onAudioTelemetry?: (cb: (telemetry: { remote: ChannelTelemetry; mic: ChannelTelemetry }) => void) => () => void;
+  feedAudioPcm?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void;
+  reportAudioHealth?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', health: 'CONNECTED' | 'NO_AUDIO_TRACK' | 'PERMISSION_DENIED' | 'STALLED') => void;
+  getSystemAudioSourceId?: () => Promise<string | null>;
+  quitApp?: () => Promise<void>;
+  minimizeApp?: () => Promise<void>;
   onGhostStreamStart?: (cb: (data: { requestId: string; question: string; isDemo?: boolean }) => void) => () => void;
   onGhostStreamChunk?: (cb: (data: { requestId: string; text: string }) => void) => () => void;
   onGhostStreamEnd?: (cb: (data: { requestId: string; fullAnswer?: string }) => void) => () => void;
-  onGhostStreamError?: (cb: (data: { requestId: string; error: { code: string; message: string } }) => void) => () => void;
+  onGhostStreamError?: (cb: (data: { requestId: string; question?: string; error: { code: string; message: string } }) => void) => () => void;
+}
+
+function downsamplePcm(input: Float32Array, fromRate: number, toRate: number = 16000): Float32Array {
+  if (fromRate === toRate || input.length === 0) return input;
+  const ratio = fromRate / toRate;
+  const newLen = Math.round(input.length / ratio);
+  const output = new Float32Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const idx = Math.min(Math.floor(i * ratio), input.length - 1);
+    output[i] = input[idx]!;
+  }
+  return output;
+}
+
+function setupStreamProcessor(
+  stream: MediaStream,
+  source: 'MICROPHONE' | 'SYSTEM_LOOPBACK',
+  feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void,
+  api?: CopilotApiBridge
+): () => void {
+  try {
+    const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    // Construct default AudioContext; avoid forcing sampleRate which can fail on certain Windows drivers
+    const audioCtx = new AudioContextClass();
+
+    const resumeContext = () => {
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume().then(() => {
+          console.log(`[AudioCapture:${source}] AudioContext resumed (state: ${audioCtx.state}, sampleRate: ${audioCtx.sampleRate})`);
+        }).catch((err) => {
+          console.warn(`[AudioCapture:${source}] AudioContext resume failed:`, err);
+        });
+      }
+    };
+
+    resumeContext();
+    audioCtx.onstatechange = () => {
+      console.log(`[AudioCapture:${source}] AudioContext state changed: ${audioCtx.state}`);
+      if (audioCtx.state === 'suspended') resumeContext();
+    };
+
+    const sourceNode = audioCtx.createMediaStreamSource(stream);
+    const scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+    let frameCount = 0;
+    let nonZeroCount = 0;
+    let peakRms = 0;
+
+    scriptProcessor.onaudioprocess = (e) => {
+      if (audioCtx.state === 'suspended') resumeContext();
+
+      const raw = e.inputBuffer.getChannelData(0);
+      const pcm = audioCtx.sampleRate !== 16000 ? downsamplePcm(raw, audioCtx.sampleRate, 16000) : new Float32Array(raw);
+
+      let sumSq = 0;
+      for (let i = 0; i < pcm.length; i++) {
+        const val = pcm[i] ?? 0;
+        sumSq += val * val;
+      }
+      const chunkRms = Math.sqrt(sumSq / (pcm.length || 1));
+      frameCount++;
+      if (chunkRms > peakRms) peakRms = chunkRms;
+      if (chunkRms > 0.001) nonZeroCount++;
+
+      if (frameCount % 60 === 0 && nonZeroCount > 0) {
+        console.log(`[AudioCapture:${source}] Frames: ${frameCount}, non-zero: ${nonZeroCount}, peak RMS: ${peakRms.toFixed(4)}, current RMS: ${chunkRms.toFixed(4)}`);
+      }
+
+      feedPcm(source, pcm);
+    };
+
+    // Route through a zero-gain node so the audio is processed by Web Audio without playing out of speakers
+    const muteGain = audioCtx.createGain();
+    muteGain.gain.value = 0;
+    sourceNode.connect(scriptProcessor);
+    scriptProcessor.connect(muteGain);
+    muteGain.connect(audioCtx.destination);
+
+    api?.reportAudioHealth?.(source, 'CONNECTED');
+
+    return () => {
+      try {
+        scriptProcessor.disconnect();
+        muteGain.disconnect();
+        sourceNode.disconnect();
+        audioCtx.close();
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {}
+    };
+  } catch (err) {
+    console.warn(`[FloatingHud] Failed to initialize AudioContext processor for ${source}:`, err);
+    api?.reportAudioHealth?.(source, 'NO_AUDIO_TRACK');
+    return () => {
+      stream.getTracks().forEach((t) => t.stop());
+    };
+  }
+}
+
+async function startMicrophoneCapture(
+  api: CopilotApiBridge | undefined,
+  feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void
+): Promise<(() => void) | null> {
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      console.warn('[FloatingHud] navigator.mediaDevices.getUserMedia not available');
+      api?.reportAudioHealth?.('MICROPHONE', 'NO_AUDIO_TRACK');
+      return null;
+    }
+    console.log('[FloatingHud] Requesting microphone access...');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      },
+      video: false
+    });
+    const tracks = stream.getAudioTracks();
+    if (tracks.length === 0) {
+      console.warn('[FloatingHud] Microphone stream has 0 audio tracks');
+      api?.reportAudioHealth?.('MICROPHONE', 'NO_AUDIO_TRACK');
+      return null;
+    }
+    console.log(`[FloatingHud] Microphone track acquired: label="${tracks[0]!.label}", readyState="${tracks[0]!.readyState}"`);
+    return setupStreamProcessor(stream, 'MICROPHONE', feedPcm, api);
+  } catch (err: unknown) {
+    const error = err as { name?: string; message?: string } | null;
+    console.error('[FloatingHud] Microphone capture failed:', error?.name, error?.message);
+    const health = error?.name === 'NotAllowedError' ? 'PERMISSION_DENIED' : 'NO_AUDIO_TRACK';
+    api?.reportAudioHealth?.('MICROPHONE', health);
+    return null;
+  }
+}
+
+async function startSystemAudioCapture(
+  api: CopilotApiBridge,
+  feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void
+): Promise<(() => void) | null> {
+  try {
+    if (!navigator.mediaDevices) {
+      console.warn('[FloatingHud] navigator.mediaDevices unavailable for system audio');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
+      return null;
+    }
+
+    let stream: MediaStream | null = null;
+    const sourceId = await api.getSystemAudioSourceId?.();
+    console.log(`[FloatingHud] Initializing system loopback capture (screen source: ${sourceId || 'none'})...`);
+
+    // Approach 1: Electron getUserMedia with desktop audio loopback
+    if (sourceId) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            mandatory: {
+              chromeMediaSource: 'desktop'
+            }
+          } as unknown as MediaTrackConstraints,
+          video: {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: sourceId,
+              maxFrameRate: 1
+            }
+          } as unknown as MediaTrackConstraints
+        });
+        if (stream.getAudioTracks().length === 0) {
+          console.warn('[LoopbackDiagnostic] getUserMedia desktop returned 0 audio tracks, attempting getDisplayMedia fallback');
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+        }
+      } catch (e: unknown) {
+        const error = e as { message?: string } | null;
+        console.warn('[FloatingHud] getUserMedia desktop failed, will try getDisplayMedia:', error?.message);
+        stream = null;
+      }
+    }
+
+    // Approach 2: Standard getDisplayMedia fallback (supported in modern Electron sessions)
+    if (!stream && navigator.mediaDevices.getDisplayMedia) {
+      try {
+        console.log('[FloatingHud] Attempting navigator.mediaDevices.getDisplayMedia for loopback audio...');
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          audio: true,
+          video: true
+        });
+      } catch (e: unknown) {
+        const error = e as { message?: string } | null;
+        console.warn('[FloatingHud] getDisplayMedia loopback capture failed:', error?.message);
+        stream = null;
+      }
+    }
+
+    if (!stream) {
+      console.warn('[FloatingHud] System loopback audio capture could not acquire stream');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
+      return null;
+    }
+
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      console.warn('[LoopbackDiagnostic] Desktop loopback stream has NO audio tracks!');
+      stream.getTracks().forEach((t) => t.stop());
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
+      return null;
+    }
+
+    const track = audioTracks[0]!;
+    console.log(`[LoopbackDiagnostic] Loopback track active: label="${track.label}", id="${track.id}", readyState="${track.readyState}"`);
+
+    track.onended = () => {
+      console.warn('[LoopbackDiagnostic] Loopback audio track ended unexpectedly!');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
+    };
+    track.onmute = () => {
+      console.warn('[LoopbackDiagnostic] Loopback audio track muted by system/hardware!');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'STALLED');
+    };
+    track.onunmute = () => {
+      console.log('[LoopbackDiagnostic] Loopback audio track unmuted.');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'CONNECTED');
+    };
+
+    return setupStreamProcessor(stream, 'SYSTEM_LOOPBACK', feedPcm, api);
+  } catch (err: unknown) {
+    const error = err as { message?: string } | null;
+    console.warn('[FloatingHud] System loopback audio capture unavailable:', error?.message);
+    api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
+    return null;
+  }
 }
 
 export const FloatingHud: React.FC = () => {
@@ -36,78 +357,170 @@ export const FloatingHud: React.FC = () => {
   const [instructionsInput, setInstructionsInput] = useState<string>('Deliver a spoken-ready conversational sentence opening with 5-7 concrete technical terms, followed by 2-3 key trade-off bullet points. Zero conversational filler.');
   const [quickPrompt, setQuickPrompt] = useState<string>('');
   const [providerInfo, setProviderInfo] = useState<{ provider: string; model: string; isDemo: boolean } | null>(null);
-  const [latestTranscript, setLatestTranscript] = useState<{ speaker: string; text: string } | null>(null);
+  const [latestTranscript, setLatestTranscript] = useState<{ speaker: string; text: string; isFinal: boolean } | null>(null);
+  const [audioTelemetry, setAudioTelemetry] = useState<{ remote: ChannelTelemetry; mic: ChannelTelemetry } | null>(null);
 
-  // Unified Answer & Stream State
-  const [currentQuestion, setCurrentQuestion] = useState<string>('');
-  const [streamedText, setStreamedText] = useState<string>('');
-  const [answerStatus, setAnswerStatus] = useState<'IDLE' | 'STREAMING' | 'COMPLETED' | 'ERROR'>('IDLE');
-  const [errorMessage, setErrorMessage] = useState<{ code: string; message: string } | null>(null);
+  // Session & Multi-Conversation States
+  const [conversations, setConversations] = useState<SessionConversationItem[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
+  const [sessionsList, setSessionsList] = useState<StoredContextSession[]>([]);
+  const [showSessionsModal, setShowSessionsModal] = useState<boolean>(false);
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
+  const [copiedItemId, setCopiedItemId] = useState<string | null>(null);
+  const [copiedAll, setCopiedAll] = useState<boolean>(false);
+  const conversationScrollRef = useRef<HTMLDivElement>(null);
+
+  const isAnyStreaming = conversations.some((c) => c.status === 'STREAMING');
+  const hasActiveContent = conversations.length > 0 && !isCollapsed;
+
   const [cardOpacity, setCardOpacity] = useState<number>(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('desktop_copilot_opacity') : null;
-    return saved ? parseFloat(saved) : 0.95;
+    const parsed = saved ? parseFloat(saved) : 0.95;
+    return Math.max(0.70, Math.min(1.0, isNaN(parsed) ? 0.95 : parsed));
   });
-  const [copiedQ, setCopiedQ] = useState<boolean>(false);
-  const [copiedA, setCopiedA] = useState<boolean>(false);
-  const [copiedAll, setCopiedAll] = useState<boolean>(false);
 
-  const hasActiveAnswer = answerStatus !== 'IDLE' && (!!streamedText || !!currentQuestion || answerStatus === 'ERROR');
-
-  // Dynamically resize Electron HUD window so unified card or dialog fits smoothly
+  // Dynamically resize Electron HUD window so conversations or dialogs fit smoothly
   useEffect(() => {
     const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
-    if (showConfigModal) {
-      api?.setHudSize?.({ width: 640, height: 420 });
-    } else if (hasActiveAnswer) {
-      api?.setHudSize?.({ width: 640, height: 560 });
+    if (showConfigModal || showSessionsModal) {
+      api?.setHudSize?.({ width: 660, height: 480 });
+    } else if (hasActiveContent) {
+      api?.setHudSize?.({ width: 660, height: 580 });
     } else {
-      api?.setHudSize?.({ width: 640, height: 95 });
+      api?.setHudSize?.({ width: 660, height: 95 });
     }
-  }, [showConfigModal, hasActiveAnswer]);
+  }, [showConfigModal, showSessionsModal, hasActiveContent]);
+
+  // Auto-scroll when new items are added or conversations change
+  useEffect(() => {
+    if (conversationScrollRef.current) {
+      conversationScrollRef.current.scrollTop = conversationScrollRef.current.scrollHeight;
+    }
+  }, [conversations.length]);
 
   useEffect(() => {
     const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
     if (!api) return;
+
+    // Load initial active session & session list on mount
+    api.getSession?.().then((sessUnknown) => {
+      const sess = sessUnknown as StoredContextSession | null;
+      if (sess) {
+        setActiveSessionId(sess.sessionId);
+        if (sess.transcripts && sess.transcripts.length > 0) {
+          setConversations(parseTranscriptsToConversations(sess.transcripts));
+        }
+      }
+    });
+
+    api.listSessions?.().then((list) => {
+      if (list) setSessionsList(list);
+    });
 
     const unsubMode = api.onOverlayModeChanged?.((newMode) => setMode(newMode));
 
     const unsubTranscript = api.onTranscriptEvent?.((data) => {
       setLatestTranscript({
         speaker: data.speaker === 'REMOTE_SPEAKER' ? 'Interviewer' : 'You',
-        text: data.text
+        text: data.text,
+        isFinal: data.isFinal
       });
     });
 
     const unsubStart = api.onGhostStreamStart?.((data) => {
-      setCurrentQuestion(data.question);
-      setStreamedText('');
-      setErrorMessage(null);
-      setAnswerStatus('STREAMING');
-      setCopiedQ(false);
-      setCopiedA(false);
+      setIsCollapsed(false);
       setCopiedAll(false);
+      setConversations((prev) => {
+        const existingIdx = prev.findIndex((item) => item.id === data.requestId);
+        if (existingIdx >= 0) {
+          const updated = [...prev];
+          updated[existingIdx] = {
+            ...updated[existingIdx]!,
+            question: data.question,
+            answer: '',
+            status: 'STREAMING',
+            error: null
+          };
+          return updated;
+        }
+        return [
+          ...prev,
+          {
+            id: data.requestId,
+            timestamp: Date.now(),
+            question: data.question,
+            answer: '',
+            status: 'STREAMING',
+            error: null
+          }
+        ];
+      });
     });
 
     const unsubChunk = api.onGhostStreamChunk?.((data) => {
-      setStreamedText((t) => t + data.text);
+      setConversations((prev) =>
+        prev.map((item) =>
+          item.id === data.requestId
+            ? { ...item, answer: item.answer + data.text, status: 'STREAMING' }
+            : item
+        )
+      );
     });
 
-    const unsubEnd = api.onGhostStreamEnd?.(() => {
-      setAnswerStatus('COMPLETED');
+    const unsubEnd = api.onGhostStreamEnd?.((data) => {
+      setConversations((prev) =>
+        prev.map((item) =>
+          item.id === data.requestId
+            ? {
+                ...item,
+                answer: data.fullAnswer !== undefined ? data.fullAnswer : item.answer,
+                status: 'COMPLETED'
+              }
+            : item
+        )
+      );
+      api.listSessions?.().then((list) => {
+        if (list) setSessionsList(list);
+      });
     });
 
     const unsubError = api.onGhostStreamError?.((data) => {
-      setAnswerStatus('ERROR');
-      setErrorMessage(data.error);
+      setConversations((prev) => {
+        const existingIdx = prev.findIndex((item) => item.id === data.requestId);
+        if (existingIdx >= 0) {
+          const updated = [...prev];
+          updated[existingIdx] = {
+            ...updated[existingIdx]!,
+            status: 'ERROR',
+            error: data.error
+          };
+          return updated;
+        }
+        return [
+          ...prev,
+          {
+            id: data.requestId,
+            timestamp: Date.now(),
+            question: data.question || 'Question',
+            answer: '',
+            status: 'ERROR',
+            error: data.error
+          }
+        ];
+      });
     });
 
     api.getProviderStatus?.().then((info) => {
       if (info) setProviderInfo(info);
     });
 
+    const unsubTelemetry = api.onAudioTelemetry?.((data) => {
+      setAudioTelemetry(data);
+    });
+
     const unsubOpacity = api.onAdjustOpacity?.((delta) => {
       setCardOpacity((prev) => {
-        const next = Math.max(0.15, Math.min(1.0, Math.round((prev + delta) * 100) / 100));
+        const next = Math.max(0.70, Math.min(1.0, Math.round((prev + delta) * 100) / 100));
         localStorage.setItem('desktop_copilot_opacity', String(next));
         api.setWindowOpacity?.(next);
         return next;
@@ -119,7 +532,7 @@ export const FloatingHud: React.FC = () => {
         if (e.key === '[' || e.key === '{') {
           e.preventDefault();
           setCardOpacity((prev) => {
-            const next = Math.max(0.15, Math.min(1.0, Math.round((prev - 0.1) * 100) / 100));
+            const next = Math.max(0.70, Math.min(1.0, Math.round((prev - 0.05) * 100) / 100));
             localStorage.setItem('desktop_copilot_opacity', String(next));
             api.setWindowOpacity?.(next);
             return next;
@@ -127,7 +540,7 @@ export const FloatingHud: React.FC = () => {
         } else if (e.key === ']' || e.key === '}') {
           e.preventDefault();
           setCardOpacity((prev) => {
-            const next = Math.max(0.15, Math.min(1.0, Math.round((prev + 0.1) * 100) / 100));
+            const next = Math.max(0.70, Math.min(1.0, Math.round((prev + 0.05) * 100) / 100));
             localStorage.setItem('desktop_copilot_opacity', String(next));
             api.setWindowOpacity?.(next);
             return next;
@@ -148,12 +561,63 @@ export const FloatingHud: React.FC = () => {
       unsubEnd?.();
       unsubError?.();
       unsubOpacity?.();
+      unsubTelemetry?.();
       window.removeEventListener('keydown', handleWindowKeyDown);
     };
   }, []);
 
+  // Real Microphone Stream Capture
+  useEffect(() => {
+    if (!micActive) return;
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (!api?.feedAudioPcm) return;
+
+    let cleanupFn: (() => void) | null = null;
+    let isCancelled = false;
+
+    startMicrophoneCapture(api, (source, pcm) => {
+      api.feedAudioPcm?.(source, pcm);
+    }).then((cleanup) => {
+      if (isCancelled) {
+        cleanup?.();
+      } else {
+        cleanupFn = cleanup;
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+      cleanupFn?.();
+    };
+  }, [micActive]);
+
+  // Real System Audio Loopback Capture
+  useEffect(() => {
+    if (!screenActive) return;
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (!api?.feedAudioPcm) return;
+
+    let cleanupFn: (() => void) | null = null;
+    let isCancelled = false;
+
+    startSystemAudioCapture(api, (source, pcm) => {
+      api.feedAudioPcm?.(source, pcm);
+    }).then((cleanup) => {
+      if (isCancelled) {
+        cleanup?.();
+      } else {
+        cleanupFn = cleanup;
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+      cleanupFn?.();
+    };
+  }, [screenActive]);
+
   const updateOpacity = (val: number) => {
-    const clamped = Math.max(0.15, Math.min(1.0, Math.round(val * 100) / 100));
+    const clamped = Math.max(0.70, Math.min(1.0, Math.round(val * 100) / 100));
     setCardOpacity(clamped);
     localStorage.setItem('desktop_copilot_opacity', String(clamped));
     const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
@@ -241,30 +705,84 @@ export const FloatingHud: React.FC = () => {
     }
   };
 
-  const handleCopyQuestion = async () => {
-    if (!currentQuestion) return;
-    const ok = await copyTextToClipboard(currentQuestion);
+  const handleCopyItem = async (item: SessionConversationItem) => {
+    const fullText = `Question:\n${item.question}\n\nAnswer:\n${item.answer}`;
+    const ok = await copyTextToClipboard(fullText);
     if (ok) {
-      setCopiedQ(true);
-      setTimeout(() => setCopiedQ(false), 2000);
-    }
-  };
-
-  const handleCopyAnswer = async () => {
-    if (!streamedText) return;
-    const ok = await copyTextToClipboard(streamedText);
-    if (ok) {
-      setCopiedA(true);
-      setTimeout(() => setCopiedA(false), 2000);
+      setCopiedItemId(item.id);
+      setTimeout(() => setCopiedItemId(null), 2000);
     }
   };
 
   const handleCopyAll = async () => {
-    const fullText = `Question:\n${currentQuestion}\n\nAnswer:\n${streamedText}`;
+    if (conversations.length === 0) return;
+    const fullText = conversations
+      .map(
+        (c, idx) =>
+          `### Q #${idx + 1}: ${c.question}\n\n**Answer:**\n${c.answer || '(In progress...)'}`
+      )
+      .join('\n\n---\n\n');
     const ok = await copyTextToClipboard(fullText);
     if (ok) {
       setCopiedAll(true);
       setTimeout(() => setCopiedAll(false), 2000);
+    }
+  };
+
+  const handleNewChat = async () => {
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (!api?.createSession) return;
+    try {
+      const newSess = (await api.createSession({
+        roleOrPersona: roleInput,
+        instructions: instructionsInput
+      })) as StoredContextSession | null;
+      if (newSess) {
+        setActiveSessionId(newSess.sessionId);
+        setConversations([]);
+        setIsCollapsed(false);
+        const list = (await api.listSessions?.()) as StoredContextSession[] | null;
+        if (list) setSessionsList(list);
+      }
+    } catch (err) {
+      console.error('[FloatingHud] Failed to create new chat session:', err);
+    }
+  };
+
+  const handleOpenSessionsModal = async () => {
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (api?.listSessions) {
+      try {
+        const list = (await api.listSessions()) as StoredContextSession[] | null;
+        if (list) setSessionsList(list);
+      } catch (err) {
+        console.warn('Failed to refresh sessions list:', err);
+      }
+    }
+    setShowSessionsModal(true);
+  };
+
+  const handleSwitchSession = async (sessId: string) => {
+    if (sessId === activeSessionId) {
+      setShowSessionsModal(false);
+      return;
+    }
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (!api?.switchSession) return;
+    try {
+      const sess = (await api.switchSession(sessId)) as StoredContextSession | null;
+      if (sess) {
+        setActiveSessionId(sess.sessionId);
+        if (sess.transcripts) {
+          setConversations(parseTranscriptsToConversations(sess.transcripts));
+        } else {
+          setConversations([]);
+        }
+        setIsCollapsed(false);
+        setShowSessionsModal(false);
+      }
+    } catch (err) {
+      console.error('[FloatingHud] Failed to switch session:', err);
     }
   };
 
@@ -301,6 +819,7 @@ export const FloatingHud: React.FC = () => {
       const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
       const question = quickPrompt.trim();
       setQuickPrompt('');
+      setIsCollapsed(false);
       await api?.feedTranscript?.({
         speaker: 'REMOTE_SPEAKER',
         text: question,
@@ -314,11 +833,23 @@ export const FloatingHud: React.FC = () => {
     await api?.cancelActiveRequest?.();
   };
 
+  const handleRetry = async (questionToRetry?: string) => {
+    const q = questionToRetry || conversations[conversations.length - 1]?.question;
+    if (!q) return;
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    if (api?.retryQuestion) {
+      await api.retryQuestion(q);
+    } else if (api?.feedTranscript) {
+      await api.feedTranscript({
+        speaker: 'REMOTE_SPEAKER',
+        text: q,
+        isFinal: true
+      });
+    }
+  };
+
   const handleDismissAnswer = () => {
-    setAnswerStatus('IDLE');
-    setStreamedText('');
-    setCurrentQuestion('');
-    setErrorMessage(null);
+    setIsCollapsed(true);
   };
 
   return (
@@ -397,6 +928,9 @@ export const FloatingHud: React.FC = () => {
 
             {/* Audio Waveform */}
             <AudioWaveform active={micActive} />
+
+            {/* Live Dual-Stream Audio Diagnostic Pill */}
+            <AudioDiagnosticPill telemetry={audioTelemetry} />
           </div>
 
           {/* Right Cluster: Media Toggles + Demo Q&A + Stop + Settings */}
@@ -404,34 +938,34 @@ export const FloatingHud: React.FC = () => {
             className="flex items-center gap-2 app-no-drag"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           >
-            {/* Segmented Media Controls (Mic & Screen) */}
-            <div className="flex items-center bg-slate-900/60 p-0.5 rounded-lg border border-white/10">
+            {/* Segmented Media Controls (Mic & Screen) - Icons Only */}
+            <div className="flex items-center bg-slate-900/70 p-0.5 rounded-lg border border-white/10 gap-0.5 shadow-inner">
               <button
                 type="button"
                 onClick={() => setMicActive(!micActive)}
-                className={`h-6 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 ${
+                className={`h-7 w-7 rounded-md transition-all flex items-center justify-center select-none ${
                   micActive
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-400/30'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 shadow-sm shadow-emerald-500/20'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border border-transparent'
                 }`}
+                aria-label={micActive ? 'Mute microphone' : 'Unmute microphone'}
                 title={micActive ? 'Microphone Active (Click to mute)' : 'Microphone Muted (Click to unmute)'}
               >
-                <span>{micActive ? '🎙️' : '🔇'}</span>
-                <span className="text-[9.5px] uppercase font-semibold">{micActive ? 'Mic' : 'Muted'}</span>
+                <MicIcon active={micActive} className="w-3.5 h-3.5 transition-transform active:scale-90" />
               </button>
 
               <button
                 type="button"
                 onClick={() => setScreenActive(!screenActive)}
-                className={`h-6 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 ${
+                className={`h-7 w-7 rounded-md transition-all flex items-center justify-center select-none ${
                   screenActive
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-400/30'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-400/40 shadow-sm shadow-sky-500/20'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border border-transparent'
                 }`}
-                title={screenActive ? 'Screen Capture Active' : 'Screen Capture Paused'}
+                aria-label={screenActive ? 'Pause screen capture' : 'Resume screen capture'}
+                title={screenActive ? 'Screen Capture Active (Click to pause)' : 'Screen Capture Paused (Click to resume)'}
               >
-                <span>{screenActive ? '🖥️' : '⏹️'}</span>
-                <span className="text-[9.5px] uppercase font-semibold">{screenActive ? 'Screen' : 'Off'}</span>
+                <ScreenIcon active={screenActive} className="w-3.5 h-3.5 transition-transform active:scale-90" />
               </button>
             </div>
 
@@ -440,10 +974,10 @@ export const FloatingHud: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setShowOpacitySlider(!showOpacitySlider)}
-                className="h-6 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 text-slate-300 hover:text-white hover:bg-white/10"
+                className="h-7 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1.5 text-slate-300 hover:text-white hover:bg-white/10 select-none"
                 title="Adjust Transparency (Ctrl+Shift+[ to dim, Ctrl+Shift+] to brighten)"
               >
-                <span>💧</span>
+                <DropletIcon className="w-3.5 h-3.5 text-sky-400" />
                 <span className="text-[10px] font-mono font-semibold">{Math.round(cardOpacity * 100)}%</span>
               </button>
 
@@ -458,7 +992,7 @@ export const FloatingHud: React.FC = () => {
                   </div>
                   <input
                     type="range"
-                    min="0.15"
+                    min="0.70"
                     max="1"
                     step="0.05"
                     value={cardOpacity}
@@ -468,17 +1002,17 @@ export const FloatingHud: React.FC = () => {
                   <div className="flex items-center justify-between gap-1 text-[9px] text-slate-400">
                     <button
                       type="button"
-                      onClick={() => updateOpacity(0.35)}
-                      className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
-                    >
-                      35%
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => updateOpacity(0.70)}
                       className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
                     >
                       70%
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateOpacity(0.85)}
+                      className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
+                    >
+                      85%
                     </button>
                     <button
                       type="button"
@@ -496,33 +1030,15 @@ export const FloatingHud: React.FC = () => {
               )}
             </div>
 
-            {/* Demo Q&A Trigger Button */}
-            <button
-              type="button"
-              onClick={async () => {
-                const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
-                await api?.feedTranscript?.({
-                  speaker: 'REMOTE_SPEAKER',
-                  text: 'Can you explain your approach to handling database sharding and cross-shard queries?',
-                  isFinal: true
-                });
-              }}
-              className="h-7 px-2.5 rounded-lg text-[11px] font-semibold bg-gradient-to-r from-amber-500/20 to-amber-600/20 hover:from-amber-500/30 hover:to-amber-600/30 text-amber-300 border border-amber-400/40 shadow-sm shadow-amber-500/10 transition-all flex items-center gap-1 select-none"
-              title="Simulate incoming interviewer question"
-            >
-              <span>⚡</span>
-              <span>Demo Q&A</span>
-            </button>
-
             {/* Cancel/Stop Streaming Button (Only when streaming) */}
-            {answerStatus === 'STREAMING' && (
+            {isAnyStreaming && (
               <button
                 type="button"
                 onClick={handleCancelActive}
-                className="h-7 px-2 rounded-lg text-[11px] font-medium bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-400/40 transition-all flex items-center gap-1 animate-pulse select-none"
+                className="h-7 px-2 rounded-lg text-[11px] font-medium bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-400/40 transition-all flex items-center gap-1.5 animate-pulse select-none"
                 title="Cancel current generation"
               >
-                <span>⏹</span>
+                <StopIcon className="w-3 h-3 text-rose-300" />
                 <span>Stop</span>
               </button>
             )}
@@ -534,10 +1050,10 @@ export const FloatingHud: React.FC = () => {
                 const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
                 await api?.toggleVisibility?.();
               }}
-              className="h-7 px-2 rounded-lg text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center gap-1 text-xs select-none"
+              className="h-7 px-2 rounded-lg text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center gap-1.5 text-xs select-none"
               title="Hide Overlay (Ctrl+Shift+H) - Press Ctrl+Shift+H anywhere to bring it back"
             >
-              <span>👁️</span>
+              <EyeIcon className="w-3.5 h-3.5 text-slate-300" />
               <kbd className="text-[8.5px] font-mono text-slate-400 bg-black/40 px-1 py-0.2 rounded border border-white/10">
                 Ctrl+Shift+H
               </kbd>
@@ -550,40 +1066,112 @@ export const FloatingHud: React.FC = () => {
               className="h-7 w-7 rounded-lg text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center justify-center text-xs select-none"
               title="Session Persona & Context"
             >
-              ⚙️
+              <GearIcon className="w-3.5 h-3.5 text-slate-300" />
             </button>
+
+            {/* Window Controls: Minimize & Close */}
+            <div className="flex items-center gap-1 pl-1 ml-0.5 border-l border-white/10">
+              <button
+                type="button"
+                onClick={async () => {
+                  const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+                  await api?.minimizeApp?.();
+                }}
+                className="h-7 w-7 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 border border-transparent hover:border-white/10 transition-all flex items-center justify-center select-none"
+                title="Minimize / Hide to System Tray (Ctrl+Shift+H)"
+              >
+                <MinimizeIcon className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+                  await api?.quitApp?.();
+                }}
+                className="h-7 w-7 rounded-lg text-slate-400 hover:text-rose-300 hover:bg-rose-500/20 hover:border-rose-400/40 border border-transparent transition-all flex items-center justify-center select-none"
+                title="Exit Desktop Copilot"
+              >
+                <CloseIcon className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Second Row: Prompt Input Bar & Interviewer Ticker */}
+        {/* Second Row: Session Controls + Prompt Input Bar + Interviewer Ticker */}
         <div
           className="flex items-center gap-2 pt-2 border-t border-white/10 app-no-drag"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
-          <div className="flex-1">
+          {/* Action Button 1: Start New Chat Session */}
+          <button
+            type="button"
+            onClick={handleNewChat}
+            className="h-7 px-2.5 rounded-lg text-[11px] font-semibold bg-sky-500/15 hover:bg-sky-500/25 active:scale-95 text-sky-200 border border-sky-400/30 transition-all flex items-center gap-1.5 shadow-sm select-none shrink-0"
+            title="Start a new chat session with its own conversation history"
+          >
+            <PlusIcon className="w-3.5 h-3.5 text-sky-300" />
+            <span>New Chat</span>
+          </button>
+
+          {/* Action Button 2: Sessions List & Switcher */}
+          <button
+            type="button"
+            onClick={handleOpenSessionsModal}
+            className="h-7 px-2.5 rounded-lg text-[11px] font-medium bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all flex items-center gap-1.5 select-none shrink-0"
+            title="View and switch between chat sessions"
+          >
+            <HistoryIcon className="w-3.5 h-3.5 text-slate-300" />
+            <span>Sessions{sessionsList.length > 0 ? ` (${sessionsList.length})` : ''}</span>
+          </button>
+
+          {/* Prompt input */}
+          <div className="flex-1 min-w-[140px]">
             <input
               type="text"
               value={quickPrompt}
               onChange={(e) => setQuickPrompt(e.target.value)}
               onKeyDown={handleQuickPromptSubmit}
-              placeholder="Type question & press Enter..."
+              placeholder="Ask question & press Enter..."
               className="w-full text-xs px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-sky-400/80 focus:bg-white/10 transition-all"
             />
           </div>
 
+          {/* Interviewer Live Transcript Ticker */}
           {latestTranscript && (
             <div
-              className="max-w-[230px] truncate text-[10px] text-slate-300 bg-white/5 px-2.5 py-1.5 rounded-lg border border-white/10 select-none flex items-center gap-1"
+              className={`max-w-[220px] truncate text-[10px] px-2.5 py-1.5 rounded-lg border select-none flex items-center gap-1.5 transition-all shrink-0 ${
+                latestTranscript.isFinal
+                  ? 'text-slate-200 bg-white/10 border-white/15'
+                  : 'text-slate-300 bg-sky-500/10 border-sky-400/30 italic'
+              }`}
               title={`${latestTranscript.speaker}: ${latestTranscript.text}`}
             >
-              <span className="text-sky-400 font-semibold shrink-0">{latestTranscript.speaker}:</span>
+              <span className={`font-semibold shrink-0 ${latestTranscript.speaker === 'Interviewer' ? 'text-sky-400' : 'text-emerald-400'}`}>
+                {latestTranscript.speaker}:
+              </span>
               <span className="truncate">{latestTranscript.text}</span>
+              {!latestTranscript.isFinal && (
+                <span className="h-1.5 w-1.5 rounded-full bg-sky-400 animate-pulse shrink-0"></span>
+              )}
             </div>
+          )}
+
+          {/* Re-expand button when collapsed */}
+          {conversations.length > 0 && isCollapsed && (
+            <button
+              type="button"
+              onClick={() => setIsCollapsed(false)}
+              className="h-7 px-2 rounded-lg text-[10px] font-medium bg-sky-500/20 text-sky-300 border border-sky-400/30 hover:bg-sky-500/30 transition-all select-none shrink-0"
+              title="Show chat conversation history"
+            >
+              Show Chat ({conversations.length})
+            </button>
           )}
         </div>
 
-        {/* Unified Question & Answer Section (Displays when active) */}
-        {hasActiveAnswer && (
+        {/* Unified Session Conversations Feed (Displays when active) */}
+        {conversations.length > 0 && !isCollapsed && (
           <div
             className="mt-2.5 pt-2 border-t border-white/15 app-no-drag flex flex-col space-y-2.5"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
@@ -592,146 +1180,149 @@ export const FloatingHud: React.FC = () => {
             <div className="flex items-center justify-between text-xs pb-1">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-bold tracking-wider uppercase text-sky-400 flex items-center gap-1.5">
-                  {answerStatus === 'STREAMING' && (
+                  {isAnyStreaming && (
                     <span className="relative flex h-2 w-2">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
                       <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-500"></span>
                     </span>
                   )}
-                  ⚡ Copilot Response
+                  ⚡ Session Conversation ({conversations.length} {conversations.length === 1 ? 'Turn' : 'Turns'})
                 </span>
 
                 <span className="text-[9.5px] text-slate-400 select-none">
-                  {mode === 'INTERACTIVE' ? 'Touch & Scrollable' : '100% Click-through'}
+                  {mode === 'INTERACTIVE' ? 'Scroll up for turn 1' : '100% Click-through'}
                 </span>
               </div>
 
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-2">
                 {mode === 'INTERACTIVE' && (
-                  <div className="flex items-center gap-1.5 text-[10px] text-slate-400 select-none">
-                    <span>Opacity:</span>
-                    <input
-                      type="range"
-                      min="0.3"
-                      max="1"
-                      step="0.05"
-                      value={cardOpacity}
-                      onChange={(e) => setCardOpacity(parseFloat(e.target.value))}
-                      className="w-14 h-1 bg-slate-700 rounded-lg cursor-pointer accent-sky-400"
-                    />
-                    <span className="text-[9.5px] font-mono text-slate-300 w-6">
-                      {Math.round(cardOpacity * 100)}%
-                    </span>
-                  </div>
-                )}
-
-                {mode === 'INTERACTIVE' && streamedText && (
                   <button
                     type="button"
                     onClick={handleCopyAll}
                     className="app-no-drag text-[10px] h-6 px-2.5 rounded-md font-medium transition-all bg-white/5 hover:bg-white/15 border border-white/15 text-slate-200 flex items-center gap-1 select-none"
-                    title="Copy both Question and Answer to Clipboard"
+                    title="Copy entire session conversation to clipboard"
                   >
                     {copiedAll ? (
                       <span className="text-emerald-400 font-semibold flex items-center gap-1">✓ Copied All!</span>
                     ) : (
-                      <span>📋 Copy All</span>
+                      <span>📋 Copy Session</span>
                     )}
                   </button>
                 )}
 
                 <button
                   type="button"
-                  onClick={handleDismissAnswer}
+                  onClick={() => setIsCollapsed(true)}
                   className="app-no-drag text-slate-400 hover:text-white cursor-pointer text-xs p-1 rounded-md hover:bg-white/10 transition-colors select-none"
-                  title="Dismiss Answer (Collapses view)"
+                  title="Collapse conversation feed"
                 >
                   ✕
                 </button>
               </div>
             </div>
 
-            {/* Scrollable Container for Question & Answer */}
-            <div className="max-h-[50vh] overflow-y-auto pr-1 space-y-2.5 custom-scrollbar select-text cursor-text">
-              {/* Question Block */}
-              {currentQuestion && (
-                <div className="bg-slate-900/50 border border-white/10 rounded-xl p-3 flex flex-col space-y-1.5">
-                  <div className="flex items-center justify-between border-b border-white/10 pb-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
-                      Question
-                    </span>
-                    {mode === 'INTERACTIVE' && (
-                      <button
-                        type="button"
-                        onClick={handleCopyQuestion}
-                        className="app-no-drag text-[10px] h-6 px-2.5 rounded-md font-medium transition-all bg-white/5 hover:bg-white/15 border border-white/15 text-slate-200 flex items-center gap-1 select-none"
-                        title="Copy Question only"
-                      >
-                        {copiedQ ? (
-                          <span className="text-emerald-400 font-semibold flex items-center gap-1">✓ Copied!</span>
-                        ) : (
-                          <span>📋 Copy Q</span>
-                        )}
-                      </button>
-                    )}
-                  </div>
-                  <p className="text-xs text-slate-100 font-medium leading-relaxed select-text cursor-text break-words">
-                    {currentQuestion}
-                  </p>
-                </div>
-              )}
-
-              {/* Error Banner */}
-              {answerStatus === 'ERROR' && errorMessage && (
-                <div className="p-2.5 rounded-xl bg-rose-950/70 border border-rose-500/40 text-rose-200 text-xs">
-                  <div className="font-semibold text-rose-300 mb-0.5">
-                    ⚠️ {errorMessage.code}
-                  </div>
-                  <div>{errorMessage.message}</div>
-                </div>
-              )}
-
-              {/* Thinking / Streaming placeholder before first token */}
-              {answerStatus === 'STREAMING' && !streamedText && (
-                <div className="bg-slate-900/60 border border-sky-500/20 rounded-xl p-3 flex items-center gap-2.5 text-xs text-sky-200">
-                  <span className="relative flex h-2 w-2 shrink-0">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-400"></span>
-                  </span>
-                  <span className="font-medium animate-pulse text-[11px] text-sky-300">
-                    Analyzing question & generating key points...
-                  </span>
-                </div>
-              )}
-
-              {/* Answer Block */}
-              {streamedText && (
-                <div className="bg-slate-900/60 border border-white/10 rounded-xl p-3.5 flex flex-col space-y-2">
+            {/* Vertically Scrollable Container: allows user to scroll all the way up to turn 1 */}
+            <div
+              ref={conversationScrollRef}
+              className="max-h-[50vh] overflow-y-auto pr-1.5 space-y-3 custom-scrollbar select-text cursor-text"
+            >
+              {conversations.map((item, idx) => (
+                <div
+                  key={item.id}
+                  className="bg-slate-900/60 border border-white/10 rounded-xl p-3 flex flex-col space-y-2 transition-all shadow-md"
+                >
+                  {/* Turn Header */}
                   <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
-                      Answer
-                    </span>
-                    {mode === 'INTERACTIVE' && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-400/30">
+                        Q #{idx + 1}
+                      </span>
+                      <span className="text-[9.5px] text-slate-400 font-mono">
+                        {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      </span>
+                      {item.status === 'STREAMING' && (
+                        <span className="text-[10px] text-sky-400 animate-pulse font-medium flex items-center gap-1">
+                          <span className="h-1.5 w-1.5 rounded-full bg-sky-400"></span>
+                          Streaming...
+                        </span>
+                      )}
+                      {item.status === 'COMPLETED' && (
+                        <span className="text-[10px] text-emerald-400/80 font-medium flex items-center gap-1">
+                          ✓ Ready
+                        </span>
+                      )}
+                    </div>
+
+                    {mode === 'INTERACTIVE' && item.answer && (
                       <button
                         type="button"
-                        onClick={handleCopyAnswer}
-                        className="app-no-drag text-[10px] h-6 px-2.5 rounded-md font-medium transition-all bg-emerald-600/80 hover:bg-emerald-500 border border-emerald-400/40 text-white shadow-sm shadow-emerald-500/20 flex items-center gap-1 select-none"
-                        title="Copy Answer only"
+                        onClick={() => handleCopyItem(item)}
+                        className="text-[9.5px] h-5 px-2 rounded font-medium bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-all flex items-center gap-1 border border-white/10 select-none"
+                        title="Copy this Q&A pair"
                       >
-                        {copiedA ? (
-                          <span className="text-white font-semibold flex items-center gap-1">✓ Copied Answer!</span>
+                        {copiedItemId === item.id ? (
+                          <span className="text-emerald-400 font-semibold">✓ Copied</span>
                         ) : (
-                          <span>📋 Copy Answer</span>
+                          <span>📋 Copy</span>
                         )}
                       </button>
                     )}
                   </div>
 
-                  <div className="text-[13.5px] leading-relaxed font-sans text-slate-100 selection:bg-sky-500/30 selection:text-white select-text cursor-text">
-                    <MarkdownRenderer content={streamedText} />
+                  {/* Question */}
+                  <div className="bg-slate-950/60 border border-white/10 rounded-lg p-2.5">
+                    <div className="text-[9.5px] font-bold uppercase tracking-wider text-sky-400 mb-1">
+                      Question
+                    </div>
+                    <p className="text-xs text-slate-100 font-medium leading-relaxed break-words">
+                      {item.question}
+                    </p>
                   </div>
+
+                  {/* Error State */}
+                  {item.status === 'ERROR' && item.error && (
+                    <div className="p-3 rounded-lg bg-rose-950/70 border border-rose-500/40 text-rose-200 text-xs flex flex-col gap-2 shadow-inner">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[10px] text-rose-300 font-semibold">{item.error.code}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleRetry(item.question)}
+                          className="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/35 text-rose-200 text-[10px] font-medium border border-rose-400/40 transition-all flex items-center gap-1 active:scale-95 select-none"
+                        >
+                          <RetryIcon className="w-3 h-3 text-rose-300" />
+                          <span>Retry</span>
+                        </button>
+                      </div>
+                      <div className="text-[11px] leading-relaxed break-words">{item.error.message}</div>
+                    </div>
+                  )}
+
+                  {/* Streaming In-Progress Placeholder */}
+                  {item.status === 'STREAMING' && !item.answer && (
+                    <div className="bg-sky-950/30 border border-sky-500/20 rounded-lg p-2.5 flex items-center gap-2 text-xs text-sky-200">
+                      <span className="relative flex h-2 w-2 shrink-0">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-400"></span>
+                      </span>
+                      <span className="font-medium animate-pulse text-[11px] text-sky-300">
+                        Analyzing question & generating key points...
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Answer */}
+                  {item.answer && (
+                    <div className="bg-slate-950/50 border border-white/10 rounded-lg p-3">
+                      <div className="text-[9.5px] font-bold uppercase tracking-wider text-emerald-400 mb-1.5">
+                        Answer
+                      </div>
+                      <div className="text-[13px] leading-relaxed font-sans text-slate-100 selection:bg-sky-500/30 selection:text-white select-text cursor-text">
+                        <MarkdownRenderer content={item.answer} />
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
+              ))}
             </div>
           </div>
         )}
@@ -797,6 +1388,119 @@ export const FloatingHud: React.FC = () => {
               className="text-xs font-semibold h-7 px-3 shadow-lg shadow-emerald-500/20 bg-emerald-600/80 hover:bg-emerald-500 text-white border border-emerald-400/30"
             >
               {saveSuccess ? '✓ Saved!' : 'Save Context'}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      {/* Sessions List Modal Dialog */}
+      <Dialog
+        open={showSessionsModal}
+        onOpenChange={setShowSessionsModal}
+        title="📜 Chat Sessions"
+        description="Switch between previous conversations or start a new chat session."
+      >
+        <div
+          className="space-y-3 app-no-drag"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Quick Action: Start New Chat */}
+          <div className="flex items-center justify-between pb-2 border-b border-white/10">
+            <span className="text-xs text-slate-300 font-medium">
+              Total Sessions: <span className="font-mono text-sky-400 font-bold">{sessionsList.length}</span>
+            </span>
+            <Button
+              variant="emerald"
+              size="sm"
+              type="button"
+              onClick={() => {
+                setShowSessionsModal(false);
+                handleNewChat();
+              }}
+              className="text-xs font-semibold h-7 px-3 bg-emerald-600/80 hover:bg-emerald-500 text-white flex items-center gap-1.5 border border-emerald-400/30"
+            >
+              <PlusIcon className="w-3.5 h-3.5" />
+              <span>New Chat</span>
+            </Button>
+          </div>
+
+          {/* List of Sessions */}
+          <div className="max-h-[280px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+            {sessionsList.length === 0 ? (
+              <div className="text-center py-6 text-slate-400 text-xs">
+                No past sessions found. Start a new chat!
+              </div>
+            ) : (
+              sessionsList.map((s) => {
+                const isActive = s.sessionId === activeSessionId;
+                const transcriptCount = s.transcripts?.length || 0;
+                const firstQuestion = s.transcripts?.find(
+                  (t) => t.speaker === 'REMOTE_SPEAKER' || t.speaker === 'USER'
+                )?.text;
+
+                return (
+                  <div
+                    key={s.sessionId}
+                    onClick={() => handleSwitchSession(s.sessionId)}
+                    className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col gap-1.5 ${
+                      isActive
+                        ? 'bg-sky-500/15 border-sky-400/50 shadow-sm shadow-sky-500/10'
+                        : 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[11px] font-semibold text-slate-200">
+                          {s.sessionId}
+                        </span>
+                        {isActive && (
+                          <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
+                            Active
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        {new Date(s.updatedAt || s.createdAt).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </span>
+                    </div>
+
+                    {firstQuestion ? (
+                      <p className="text-[11px] text-slate-300 truncate italic">
+                        "{firstQuestion}"
+                      </p>
+                    ) : (
+                      <p className="text-[10.5px] text-slate-500 italic">
+                        Empty session (No questions yet)
+                      </p>
+                    )}
+
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 pt-0.5 border-t border-white/5">
+                      <span>{transcriptCount} turn{transcriptCount === 1 ? '' : 's'} recorded</span>
+                      {!isActive && (
+                        <span className="text-sky-400 hover:underline font-medium text-[10.5px]">
+                          Open Session →
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="flex items-center justify-end pt-2 border-t border-white/10">
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              onClick={() => setShowSessionsModal(false)}
+              className="text-xs text-slate-300 hover:text-white hover:bg-white/10 h-7 px-3 border border-white/10"
+            >
+              Close
             </Button>
           </div>
         </div>
