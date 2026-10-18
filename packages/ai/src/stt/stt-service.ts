@@ -38,7 +38,8 @@ export class ConfigurableSTTService implements STTService {
 
   async transcribeWav(
     wavBuffer: Buffer,
-    source: 'MICROPHONE' | 'SYSTEM_LOOPBACK'
+    source: 'MICROPHONE' | 'SYSTEM_LOOPBACK',
+    timing?: { audioStartMs?: number; audioEndMs?: number }
   ): Promise<TranscriptEvent | null> {
     if (this.geminiStt) {
       const text = await this.geminiStt.transcribeAudio(wavBuffer);
@@ -47,7 +48,9 @@ export class ConfigurableSTTService implements STTService {
           text: text.trim(),
           isFinal: true,
           speaker: source === 'MICROPHONE' ? 'USER' : 'REMOTE_SPEAKER',
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          audioStartMs: timing?.audioStartMs,
+          audioEndMs: timing?.audioEndMs
         };
       }
     }

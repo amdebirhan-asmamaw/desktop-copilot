@@ -1,9 +1,18 @@
 import { VadChunker } from '../vad/vad-chunker';
 import { encodeWav } from './wav-encoder';
 
+export interface SpeechSegment {
+  source: 'MICROPHONE' | 'SYSTEM_LOOPBACK';
+  wavBuffer: Buffer;
+  durationMs: number;
+  audioStartMs: number;
+  audioEndMs: number;
+}
+
 export interface AudioStreamEvents {
   onAudioLevels?: (levels: number[]) => void;
-  onSpeechSegment?: (segment: { source: 'MICROPHONE' | 'SYSTEM_LOOPBACK'; wavBuffer: Buffer; durationMs: number }) => void;
+  onSpeechSegment?: (segment: SpeechSegment) => void;
+  onSpeechStateChange?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', isSpeaking: boolean) => void;
 }
 
 class IsolatedAudioChannel {
@@ -56,12 +65,12 @@ export class DualAudioStreamManager {
     8      // 8 consecutive silence frames (~680ms) to avoid sentence fragmentation
   );
 
-  // Microphone (user): Tuned to capture real user speech while rejecting breathing and background noise
+  // Microphone (user): Tuned to capture real user speech while rejecting ambient background noise
   private micChannel = new IsolatedAudioChannel(
     'MICROPHONE',
-    0.035, // Rejects soft breathing, sighing, and ambient room noise
-    10000, // ~625ms minimum speech
-    3,     // 3 consecutive voice frames to confirm speech
+    0.012, // Captures conversational speech reliably
+    8000,  // ~500ms minimum speech
+    2,     // 2 consecutive voice frames to confirm speech
     8      // 8 consecutive silence frames (~680ms) for pause boundary
   );
 
@@ -80,41 +89,13 @@ export class DualAudioStreamManager {
     channel.recentRms = this.computeRms(pcm);
     const isVoice = channel.vad.isSpeech(pcm);
 
-    // 2. Acoustic Echo Suppression (Ducking)
-    // When the remote speaker (loopback) is playing audio or recently spoke,
-    // duck the microphone input to prevent computer speakers from echoing into the mic
-    // and falsely tagging the other party's voice as USER.
-    if (source === 'MICROPHONE') {
-      const now = Date.now();
-      const isLoopbackActive =
-        this.loopbackChannel.isSpeaking ||
-        this.loopbackChannel.recentRms > 0.004 ||
-        (now - this.loopbackChannel.lastSpeechTimestamp < 1200 && this.loopbackChannel.lastSpeechTimestamp > 0);
-
-      // Allow barge-in only if user speaks directly and significantly louder than speaker bleed
-      const isBargeIn = channel.recentRms > 0.16 && channel.recentRms > this.loopbackChannel.recentRms * 2.5;
-
-      if (isLoopbackActive && !isBargeIn) {
-        // Duck the mic: discard speaker bleed audio
-        channel.silenceStreak++;
-        if (channel.speechStreak > 0) {
-          channel.speechStreak = 0;
-          channel.isSpeaking = false;
-        }
-        // Discard accumulated mic buffer so no speaker echo lingers
-        if (channel.buffer.length > 8000) {
-          channel.buffer.splice(0, channel.buffer.length - 4000);
-        }
-        return;
-      }
-    }
-
-    // 3. Append audio to this channel's dedicated buffer
+    // 2. Append audio to this channel's dedicated buffer without destructive ducking
     for (let i = 0; i < pcm.length; i++) {
       channel.buffer.push(pcm[i] ?? 0);
     }
 
-    // 4. Update channel-specific VAD state
+    // 3. Update channel-specific VAD state
+    const previousSpeaking = channel.isSpeaking;
     if (isVoice) {
       channel.speechStreak++;
       channel.speechFramesCount++;
@@ -130,7 +111,11 @@ export class DualAudioStreamManager {
       }
     }
 
-    // 5. Evaluate pause boundary or max duration for THIS channel independently
+    if (previousSpeaking !== channel.isSpeaking) {
+      events.onSpeechStateChange?.(channel.source, channel.isSpeaking);
+    }
+
+    // 4. Evaluate pause boundary or max duration for THIS channel independently
     const isPauseBoundary =
       channel.silenceStreak >= channel.pauseSilenceStreak &&
       channel.speechFramesCount >= channel.minSpeechStreak &&
@@ -143,12 +128,21 @@ export class DualAudioStreamManager {
     if (isPauseBoundary || isMaxDurationReached) {
       const floatData = new Float32Array(channel.buffer);
       const wav = encodeWav(floatData, 16000);
+      const durationMs = Math.round((floatData.length / 16000) * 1000);
+      const audioEndMs = Date.now();
+      const audioStartMs = audioEndMs - durationMs;
+
+      console.log(`[StreamManager] Finalized ${channel.source} speech segment: ${durationMs}ms, ${floatData.length} samples (RMS: ${channel.recentRms.toFixed(4)})`);
+
       events.onSpeechSegment?.({
         source: channel.source,
         wavBuffer: wav,
-        durationMs: Math.round((floatData.length / 16000) * 1000)
+        durationMs,
+        audioStartMs,
+        audioEndMs
       });
       channel.reset();
+      events.onSpeechStateChange?.(channel.source, false);
     } else if (channel.speechFramesCount === 0 && channel.buffer.length > 16000 * 1.5) {
       // Discard silence backlog beyond 1.5 seconds, keeping 0.5s pre-roll for onset consonants
       channel.buffer.splice(0, channel.buffer.length - 8000);

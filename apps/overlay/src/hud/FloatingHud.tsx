@@ -3,6 +3,7 @@ import { Button, Card, Dialog } from '@repo/ui';
 import { AudioWaveform } from './AudioWaveform';
 import { MarkdownRenderer } from '../ghost/MarkdownRenderer';
 import { MicIcon, ScreenIcon, DropletIcon, EyeIcon, GearIcon, StopIcon, RetryIcon, CloseIcon, MinimizeIcon, PlusIcon, HistoryIcon } from './Icons';
+import { AudioDiagnosticPill, ChannelTelemetry } from './AudioDiagnosticPill';
 
 export interface SessionConversationItem {
   id: string;
@@ -103,7 +104,9 @@ interface CopilotApiBridge {
   toggleVisibility?: () => Promise<void>;
   retryQuestion?: (question?: string) => Promise<void>;
   onAudioLevels?: (cb: (levels: number[]) => void) => () => void;
+  onAudioTelemetry?: (cb: (telemetry: { remote: ChannelTelemetry; mic: ChannelTelemetry }) => void) => () => void;
   feedAudioPcm?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void;
+  reportAudioHealth?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', health: 'CONNECTED' | 'NO_AUDIO_TRACK' | 'PERMISSION_DENIED' | 'STALLED') => void;
   getSystemAudioSourceId?: () => Promise<string | null>;
   quitApp?: () => Promise<void>;
   minimizeApp?: () => Promise<void>;
@@ -128,17 +131,57 @@ function downsamplePcm(input: Float32Array, fromRate: number, toRate: number = 1
 function setupStreamProcessor(
   stream: MediaStream,
   source: 'MICROPHONE' | 'SYSTEM_LOOPBACK',
-  feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void
+  feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void,
+  api?: CopilotApiBridge
 ): () => void {
   try {
     const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    const audioCtx = new AudioContextClass({ sampleRate: 16000 });
+    // Construct default AudioContext; avoid forcing sampleRate which can fail on certain Windows drivers
+    const audioCtx = new AudioContextClass();
+
+    const resumeContext = () => {
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume().then(() => {
+          console.log(`[AudioCapture:${source}] AudioContext resumed (state: ${audioCtx.state}, sampleRate: ${audioCtx.sampleRate})`);
+        }).catch((err) => {
+          console.warn(`[AudioCapture:${source}] AudioContext resume failed:`, err);
+        });
+      }
+    };
+
+    resumeContext();
+    audioCtx.onstatechange = () => {
+      console.log(`[AudioCapture:${source}] AudioContext state changed: ${audioCtx.state}`);
+      if (audioCtx.state === 'suspended') resumeContext();
+    };
+
     const sourceNode = audioCtx.createMediaStreamSource(stream);
     const scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
 
+    let frameCount = 0;
+    let nonZeroCount = 0;
+    let peakRms = 0;
+
     scriptProcessor.onaudioprocess = (e) => {
+      if (audioCtx.state === 'suspended') resumeContext();
+
       const raw = e.inputBuffer.getChannelData(0);
       const pcm = audioCtx.sampleRate !== 16000 ? downsamplePcm(raw, audioCtx.sampleRate, 16000) : new Float32Array(raw);
+
+      let sumSq = 0;
+      for (let i = 0; i < pcm.length; i++) {
+        const val = pcm[i] ?? 0;
+        sumSq += val * val;
+      }
+      const chunkRms = Math.sqrt(sumSq / (pcm.length || 1));
+      frameCount++;
+      if (chunkRms > peakRms) peakRms = chunkRms;
+      if (chunkRms > 0.001) nonZeroCount++;
+
+      if (frameCount % 60 === 0 && nonZeroCount > 0) {
+        console.log(`[AudioCapture:${source}] Frames: ${frameCount}, non-zero: ${nonZeroCount}, peak RMS: ${peakRms.toFixed(4)}, current RMS: ${chunkRms.toFixed(4)}`);
+      }
+
       feedPcm(source, pcm);
     };
 
@@ -148,6 +191,8 @@ function setupStreamProcessor(
     sourceNode.connect(scriptProcessor);
     scriptProcessor.connect(muteGain);
     muteGain.connect(audioCtx.destination);
+
+    api?.reportAudioHealth?.(source, 'CONNECTED');
 
     return () => {
       try {
@@ -159,7 +204,8 @@ function setupStreamProcessor(
       } catch {}
     };
   } catch (err) {
-    console.warn('[FloatingHud] Failed to initialize AudioContext processor:', err);
+    console.warn(`[FloatingHud] Failed to initialize AudioContext processor for ${source}:`, err);
+    api?.reportAudioHealth?.(source, 'NO_AUDIO_TRACK');
     return () => {
       stream.getTracks().forEach((t) => t.stop());
     };
@@ -167,21 +213,37 @@ function setupStreamProcessor(
 }
 
 async function startMicrophoneCapture(
+  api: CopilotApiBridge | undefined,
   feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void
 ): Promise<(() => void) | null> {
   try {
-    if (!navigator.mediaDevices?.getUserMedia) return null;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      console.warn('[FloatingHud] navigator.mediaDevices.getUserMedia not available');
+      api?.reportAudioHealth?.('MICROPHONE', 'NO_AUDIO_TRACK');
+      return null;
+    }
+    console.log('[FloatingHud] Requesting microphone access...');
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
-        autoGainControl: false
+        autoGainControl: true
       },
       video: false
     });
-    return setupStreamProcessor(stream, 'MICROPHONE', feedPcm);
-  } catch (err) {
-    console.warn('[FloatingHud] Microphone capture unavailable:', err);
+    const tracks = stream.getAudioTracks();
+    if (tracks.length === 0) {
+      console.warn('[FloatingHud] Microphone stream has 0 audio tracks');
+      api?.reportAudioHealth?.('MICROPHONE', 'NO_AUDIO_TRACK');
+      return null;
+    }
+    console.log(`[FloatingHud] Microphone track acquired: label="${tracks[0]!.label}", readyState="${tracks[0]!.readyState}"`);
+    return setupStreamProcessor(stream, 'MICROPHONE', feedPcm, api);
+  } catch (err: unknown) {
+    const error = err as { name?: string; message?: string } | null;
+    console.error('[FloatingHud] Microphone capture failed:', error?.name, error?.message);
+    const health = error?.name === 'NotAllowedError' ? 'PERMISSION_DENIED' : 'NO_AUDIO_TRACK';
+    api?.reportAudioHealth?.('MICROPHONE', health);
     return null;
   }
 }
@@ -191,36 +253,95 @@ async function startSystemAudioCapture(
   feedPcm: (src: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void
 ): Promise<(() => void) | null> {
   try {
-    if (!navigator.mediaDevices?.getUserMedia) return null;
-    const sourceId = await api.getSystemAudioSourceId?.();
-    if (!sourceId) return null;
-
-    // Electron desktop loopback audio capture
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        mandatory: {
-          chromeMediaSource: 'desktop',
-          chromeMediaSourceId: sourceId
-        }
-      } as unknown as MediaTrackConstraints,
-      video: {
-        mandatory: {
-          chromeMediaSource: 'desktop',
-          chromeMediaSourceId: sourceId,
-          maxFrameRate: 1
-        }
-      } as unknown as MediaTrackConstraints
-    });
-
-    const audioTracks = stream.getAudioTracks();
-    if (audioTracks.length === 0) {
-      stream.getTracks().forEach((t) => t.stop());
+    if (!navigator.mediaDevices) {
+      console.warn('[FloatingHud] navigator.mediaDevices unavailable for system audio');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
       return null;
     }
 
-    return setupStreamProcessor(stream, 'SYSTEM_LOOPBACK', feedPcm);
-  } catch (err) {
-    console.warn('[FloatingHud] System loopback audio capture unavailable:', err);
+    let stream: MediaStream | null = null;
+    const sourceId = await api.getSystemAudioSourceId?.();
+    console.log(`[FloatingHud] Initializing system loopback capture (screen source: ${sourceId || 'none'})...`);
+
+    // Approach 1: Electron getUserMedia with desktop audio loopback
+    if (sourceId) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            mandatory: {
+              chromeMediaSource: 'desktop'
+            }
+          } as unknown as MediaTrackConstraints,
+          video: {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: sourceId,
+              maxFrameRate: 1
+            }
+          } as unknown as MediaTrackConstraints
+        });
+        if (stream.getAudioTracks().length === 0) {
+          console.warn('[LoopbackDiagnostic] getUserMedia desktop returned 0 audio tracks, attempting getDisplayMedia fallback');
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+        }
+      } catch (e: unknown) {
+        const error = e as { message?: string } | null;
+        console.warn('[FloatingHud] getUserMedia desktop failed, will try getDisplayMedia:', error?.message);
+        stream = null;
+      }
+    }
+
+    // Approach 2: Standard getDisplayMedia fallback (supported in modern Electron sessions)
+    if (!stream && navigator.mediaDevices.getDisplayMedia) {
+      try {
+        console.log('[FloatingHud] Attempting navigator.mediaDevices.getDisplayMedia for loopback audio...');
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          audio: true,
+          video: true
+        });
+      } catch (e: unknown) {
+        const error = e as { message?: string } | null;
+        console.warn('[FloatingHud] getDisplayMedia loopback capture failed:', error?.message);
+        stream = null;
+      }
+    }
+
+    if (!stream) {
+      console.warn('[FloatingHud] System loopback audio capture could not acquire stream');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
+      return null;
+    }
+
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      console.warn('[LoopbackDiagnostic] Desktop loopback stream has NO audio tracks!');
+      stream.getTracks().forEach((t) => t.stop());
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
+      return null;
+    }
+
+    const track = audioTracks[0]!;
+    console.log(`[LoopbackDiagnostic] Loopback track active: label="${track.label}", id="${track.id}", readyState="${track.readyState}"`);
+
+    track.onended = () => {
+      console.warn('[LoopbackDiagnostic] Loopback audio track ended unexpectedly!');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
+    };
+    track.onmute = () => {
+      console.warn('[LoopbackDiagnostic] Loopback audio track muted by system/hardware!');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'STALLED');
+    };
+    track.onunmute = () => {
+      console.log('[LoopbackDiagnostic] Loopback audio track unmuted.');
+      api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'CONNECTED');
+    };
+
+    return setupStreamProcessor(stream, 'SYSTEM_LOOPBACK', feedPcm, api);
+  } catch (err: unknown) {
+    const error = err as { message?: string } | null;
+    console.warn('[FloatingHud] System loopback audio capture unavailable:', error?.message);
+    api.reportAudioHealth?.('SYSTEM_LOOPBACK', 'NO_AUDIO_TRACK');
     return null;
   }
 }
@@ -237,6 +358,7 @@ export const FloatingHud: React.FC = () => {
   const [quickPrompt, setQuickPrompt] = useState<string>('');
   const [providerInfo, setProviderInfo] = useState<{ provider: string; model: string; isDemo: boolean } | null>(null);
   const [latestTranscript, setLatestTranscript] = useState<{ speaker: string; text: string; isFinal: boolean } | null>(null);
+  const [audioTelemetry, setAudioTelemetry] = useState<{ remote: ChannelTelemetry; mic: ChannelTelemetry } | null>(null);
 
   // Session & Multi-Conversation States
   const [conversations, setConversations] = useState<SessionConversationItem[]>([]);
@@ -392,6 +514,10 @@ export const FloatingHud: React.FC = () => {
       if (info) setProviderInfo(info);
     });
 
+    const unsubTelemetry = api.onAudioTelemetry?.((data) => {
+      setAudioTelemetry(data);
+    });
+
     const unsubOpacity = api.onAdjustOpacity?.((delta) => {
       setCardOpacity((prev) => {
         const next = Math.max(0.70, Math.min(1.0, Math.round((prev + delta) * 100) / 100));
@@ -435,6 +561,7 @@ export const FloatingHud: React.FC = () => {
       unsubEnd?.();
       unsubError?.();
       unsubOpacity?.();
+      unsubTelemetry?.();
       window.removeEventListener('keydown', handleWindowKeyDown);
     };
   }, []);
@@ -448,7 +575,7 @@ export const FloatingHud: React.FC = () => {
     let cleanupFn: (() => void) | null = null;
     let isCancelled = false;
 
-    startMicrophoneCapture((source, pcm) => {
+    startMicrophoneCapture(api, (source, pcm) => {
       api.feedAudioPcm?.(source, pcm);
     }).then((cleanup) => {
       if (isCancelled) {
@@ -468,7 +595,7 @@ export const FloatingHud: React.FC = () => {
   useEffect(() => {
     if (!screenActive) return;
     const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
-    if (!api?.feedAudioPcm || !api?.getSystemAudioSourceId) return;
+    if (!api?.feedAudioPcm) return;
 
     let cleanupFn: (() => void) | null = null;
     let isCancelled = false;
@@ -801,6 +928,9 @@ export const FloatingHud: React.FC = () => {
 
             {/* Audio Waveform */}
             <AudioWaveform active={micActive} />
+
+            {/* Live Dual-Stream Audio Diagnostic Pill */}
+            <AudioDiagnosticPill telemetry={audioTelemetry} />
           </div>
 
           {/* Right Cluster: Media Toggles + Demo Q&A + Stop + Settings */}

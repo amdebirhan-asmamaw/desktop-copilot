@@ -5,3 +5,5 @@ export * from './windows/windows-capture-adapter';
 export * from './screen/screen-grabber';
 export * from './audio/wav-encoder';
 export * from './audio/stream-manager';
+export * from './audio/diagnostics';
+export * from './audio/transcript-reconciler';

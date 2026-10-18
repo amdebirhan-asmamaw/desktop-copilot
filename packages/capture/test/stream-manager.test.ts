@@ -56,17 +56,16 @@ describe('DualAudioStreamManager', () => {
     expect(emittedSources).not.toContain('SYSTEM_LOOPBACK');
   });
 
-  it('ducks microphone input when loopback is actively speaking to prevent acoustic speaker bleed', () => {
+  it('preserves simultaneous speech on both loopback and microphone with accurate audio timestamps', () => {
     const manager = new DualAudioStreamManager();
     const segmentSpy = vi.fn();
 
     const loopbackSpeech = new Float32Array(1600).fill(0.20);
-    // Bleed on microphone with lower energy (e.g. 0.05) from speakers
-    const micBleed = new Float32Array(1600).fill(0.05);
+    const micSpeech = new Float32Array(1600).fill(0.15);
 
     for (let i = 0; i < 8; i++) {
       manager.processRawPcmChunk('SYSTEM_LOOPBACK', loopbackSpeech, { onSpeechSegment: segmentSpy });
-      manager.processRawPcmChunk('MICROPHONE', micBleed, { onSpeechSegment: segmentSpy });
+      manager.processRawPcmChunk('MICROPHONE', micSpeech, { onSpeechSegment: segmentSpy });
     }
 
     // Silence pause
@@ -76,8 +75,18 @@ describe('DualAudioStreamManager', () => {
       manager.processRawPcmChunk('MICROPHONE', silence, { onSpeechSegment: segmentSpy });
     }
 
-    // Only the true SYSTEM_LOOPBACK source should have emitted
-    expect(segmentSpy).toHaveBeenCalledTimes(1);
-    expect(segmentSpy.mock.calls[0]![0].source).toBe('SYSTEM_LOOPBACK');
+    // Both channels are independently acquired without destructive ducking
+    expect(segmentSpy).toHaveBeenCalledTimes(2);
+    const emittedSources = segmentSpy.mock.calls.map((c) => c[0].source);
+    expect(emittedSources).toContain('SYSTEM_LOOPBACK');
+    expect(emittedSources).toContain('MICROPHONE');
+
+    // Both have valid speech duration and audio clock timestamps
+    const loopbackCall = segmentSpy.mock.calls.find((c) => c[0].source === 'SYSTEM_LOOPBACK')![0];
+    const micCall = segmentSpy.mock.calls.find((c) => c[0].source === 'MICROPHONE')![0];
+    expect(loopbackCall.durationMs).toBeGreaterThan(0);
+    expect(loopbackCall.audioEndMs).toBeGreaterThan(loopbackCall.audioStartMs);
+    expect(micCall.durationMs).toBeGreaterThan(0);
+    expect(micCall.audioEndMs).toBeGreaterThan(micCall.audioStartMs);
   });
 });

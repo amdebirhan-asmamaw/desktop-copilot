@@ -4,10 +4,13 @@ import * as path from 'path';
 import { createHudWindow } from './windows/hud-window.js';
 import { SessionManager, JsonSessionStore, OrchestrationPipeline } from '@repo/core';
 import { createChatProvider, loadAIConfigFromEnv, ConfigurableSTTService, DeepgramStreamCoordinator } from '@repo/ai';
-import { validateScreenSnapshot, createBase64DataUrl, DualAudioStreamManager } from '@repo/capture';
+import { validateScreenSnapshot, createBase64DataUrl, DualAudioStreamManager, AudioCaptureDiagnostics, TranscriptReconciler } from '@repo/capture';
 
 // Ensure clean application name and isolated user data directory (avoids scoped package name / Windows cache errors)
 app.setName('desktop-copilot');
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('enable-features', 'WebAudioBypassOutputBuffering');
+
 const appDataRoot = app.getPath('appData');
 const userDataDir = path.join(appDataRoot, 'desktop-copilot');
 if (!fs.existsSync(userDataDir)) {
@@ -121,6 +124,8 @@ const aiConfig = loadAIConfigFromEnv();
 const chatProvider = createChatProvider(aiConfig);
 const sttService = new ConfigurableSTTService(aiConfig.capabilities.stt);
 const audioManager = new DualAudioStreamManager();
+const captureDiagnostics = new AudioCaptureDiagnostics();
+const transcriptReconciler = new TranscriptReconciler();
 const pipeline = new OrchestrationPipeline();
 let lastAttemptedQuestion: string = '';
 
@@ -254,8 +259,21 @@ export async function handleIncomingTranscript(
   sessionId: string,
   speaker: 'USER' | 'REMOTE_SPEAKER',
   text: string,
-  isFinal: boolean = true
+  isFinal: boolean = true,
+  audioStartMs?: number,
+  audioEndMs?: number
 ): Promise<void> {
+  const start = audioStartMs ?? Date.now();
+  const end = audioEndMs ?? Date.now();
+
+  const reconciled = transcriptReconciler.processTranscript(speaker, text, start, end);
+  if (reconciled.isProbableEcho) {
+    console.log(`[STT] Reconciled acoustic speaker echo on mic: "${text}" (discarded duplicate turn)`);
+    return;
+  }
+
+  console.log(`[STT] ${speaker}: "${text}"`);
+
   hudWin?.webContents.send('transcript:event', {
     speaker,
     text,
@@ -356,11 +374,22 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_, permission, callback) => {
-    if (permission === 'media') {
-      callback(true);
-      return;
-    }
     callback(true);
+  });
+  session.defaultSession.setPermissionCheckHandler(() => true);
+  session.defaultSession.setDevicePermissionHandler(() => true);
+  session.defaultSession.setDisplayMediaRequestHandler((_, callback) => {
+    desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+      const primary = sources[0];
+      if (primary) {
+        callback({ video: primary, audio: 'loopback' });
+      } else {
+        callback({});
+      }
+    }).catch((err) => {
+      console.warn('[DisplayMedia] Failed to get desktop sources:', err);
+      callback({});
+    });
   });
 
   const targetUrl = await resolveRendererUrl();
@@ -611,10 +640,36 @@ app.whenReady().then(async () => {
     return null;
   });
 
+  // Broadcast audio telemetry to HUD every 500ms
+  setInterval(() => {
+    if (hudWin && !hudWin.isDestroyed()) {
+      hudWin.webContents.send('hud:audio-telemetry', captureDiagnostics.getCombinedTelemetry());
+    }
+  }, 500);
+
+  function normalizePcm(raw: unknown): Float32Array {
+    if (raw instanceof Float32Array) return raw;
+    if (raw && typeof raw === 'object') {
+      if ('buffer' in raw && 'byteOffset' in raw && 'byteLength' in raw) {
+        const view = raw as ArrayBufferView;
+        return new Float32Array(view.buffer, view.byteOffset, view.byteLength / 4);
+      }
+    }
+    if (Array.isArray(raw)) return new Float32Array(raw);
+    return new Float32Array(0);
+  }
+
   // Audio Stream & System Loopback IPC Handlers
+  ipcMain.on('audio:report-health', (_, data: { source: 'MICROPHONE' | 'SYSTEM_LOOPBACK'; health: 'CONNECTED' | 'NO_AUDIO_TRACK' | 'PERMISSION_DENIED' | 'STALLED' }) => {
+    captureDiagnostics.setHealth(data.source, data.health);
+  });
+
   ipcMain.on('audio:feed-pcm', async (_, data: { source: 'MICROPHONE' | 'SYSTEM_LOOPBACK'; pcm: Float32Array | number[] }) => {
     try {
-      const pcmArray = data.pcm instanceof Float32Array ? data.pcm : new Float32Array(data.pcm);
+      const pcmArray = normalizePcm(data.pcm);
+      if (pcmArray.length === 0) return;
+      const rms = audioManager.computeRms(pcmArray);
+      captureDiagnostics.recordFrame(data.source, rms);
 
       // 1. Send to Deepgram streaming coordinator if configured
       if (deepgramCoordinator) {
@@ -628,23 +683,39 @@ app.whenReady().then(async () => {
             hudWin.webContents.send('hud:audio-levels', levels);
           }
         },
+        onSpeechStateChange: (source, isSpeaking) => {
+          captureDiagnostics.setSpeechState(source, isSpeaking ? 'SPEAKING' : 'IDLE');
+        },
         onSpeechSegment: async (segment) => {
           if (deepgramCoordinator) {
             // Deepgram already manages real-time utterance endpoints
             return;
           }
+          captureDiagnostics.setTranscriptionState(segment.source, 'TRANSCRIBING');
           try {
             if (!aiConfig.capabilities.stt.apiKey || aiConfig.capabilities.stt.apiKey === 'local') {
+              captureDiagnostics.setTranscriptionState(segment.source, 'IDLE');
               return;
             }
-            const transcript = await sttService.transcribeWav(segment.wavBuffer, segment.source);
+            const transcript = await sttService.transcribeWav(segment.wavBuffer, segment.source, {
+              audioStartMs: segment.audioStartMs,
+              audioEndMs: segment.audioEndMs
+            });
+            captureDiagnostics.setTranscriptionState(segment.source, 'IDLE');
             if (transcript && transcript.text && transcript.text.trim().length > 0) {
-              console.log(`[STT] ${transcript.speaker}: "${transcript.text}"`);
               if (activeSessionId) {
-                await handleIncomingTranscript(activeSessionId, transcript.speaker, transcript.text, true);
+                await handleIncomingTranscript(
+                  activeSessionId,
+                  transcript.speaker,
+                  transcript.text,
+                  true,
+                  transcript.audioStartMs,
+                  transcript.audioEndMs
+                );
               }
             }
           } catch (err) {
+            captureDiagnostics.setTranscriptionState(segment.source, 'ERROR');
             console.error('[STT] Failed to transcribe speech segment:', err);
           }
         }

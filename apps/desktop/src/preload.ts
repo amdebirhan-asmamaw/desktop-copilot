@@ -66,7 +66,9 @@ export interface ElectronCopilotApi {
   toggleVisibility: () => Promise<void>;
   retryQuestion: (question?: string) => Promise<void>;
   onAudioLevels: (callback: (levels: number[]) => void) => () => void;
+  onAudioTelemetry?: (callback: (telemetry: any) => void) => () => void;
   feedAudioPcm: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', pcm: Float32Array) => void;
+  reportAudioHealth?: (source: 'MICROPHONE' | 'SYSTEM_LOOPBACK', health: 'CONNECTED' | 'NO_AUDIO_TRACK' | 'PERMISSION_DENIED' | 'STALLED') => void;
   getSystemAudioSourceId: () => Promise<string | null>;
   quitApp: () => Promise<void>;
   minimizeApp: () => Promise<void>;
@@ -133,7 +135,13 @@ const api: ElectronCopilotApi = {
     ipcRenderer.on('hud:audio-levels', handler);
     return () => ipcRenderer.removeListener('hud:audio-levels', handler);
   },
+  onAudioTelemetry: (callback: (telemetry: any) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, telemetry: any) => callback(telemetry);
+    ipcRenderer.on('hud:audio-telemetry', handler);
+    return () => ipcRenderer.removeListener('hud:audio-telemetry', handler);
+  },
   feedAudioPcm: (source, pcm) => ipcRenderer.send('audio:feed-pcm', { source, pcm }),
+  reportAudioHealth: (source, health) => ipcRenderer.send('audio:report-health', { source, health }),
   getSystemAudioSourceId: () => ipcRenderer.invoke('audio:get-system-source-id'),
   quitApp: () => ipcRenderer.invoke('app:quit'),
   minimizeApp: () => ipcRenderer.invoke('app:minimize')
