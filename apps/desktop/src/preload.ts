@@ -59,6 +59,9 @@ export interface ElectronCopilotApi {
   setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => void;
   setWindowPosition: (x: number, y: number) => Promise<void>;
   getWindowPosition: () => Promise<{ x: number; y: number }>;
+  onAdjustOpacity: (callback: (delta: number) => void) => () => void;
+  setWindowOpacity: (opacity: number) => Promise<void>;
+  toggleVisibility: () => Promise<void>;
 }
 
 const api: ElectronCopilotApi = {
@@ -106,7 +109,14 @@ const api: ElectronCopilotApi = {
     ipcRenderer.send('overlay:set-ignore-mouse-events', ignore, options);
   },
   setWindowPosition: (x, y) => ipcRenderer.invoke('window:set-position', { x, y }),
-  getWindowPosition: () => ipcRenderer.invoke('window:get-position')
+  getWindowPosition: () => ipcRenderer.invoke('window:get-position'),
+  onAdjustOpacity: (callback) => {
+    const handler = (_: Electron.IpcRendererEvent, delta: number) => callback(delta);
+    ipcRenderer.on('hud:adjust-opacity', handler);
+    return () => ipcRenderer.removeListener('hud:adjust-opacity', handler);
+  },
+  setWindowOpacity: (opacity) => ipcRenderer.invoke('hud:set-opacity', opacity),
+  toggleVisibility: () => ipcRenderer.invoke('overlay:toggle-visibility')
 };
 
 contextBridge.exposeInMainWorld('copilotApi', api);

@@ -235,11 +235,19 @@ app.whenReady().then(async () => {
   });
   activeSessionId = initialSession.sessionId;
 
-  // Global Hotkey 1: Privacy/Panic Hide Toggle (Ctrl+Shift+H)
+  // Global Hotkey 1: Privacy/Hide Toggle (Ctrl+Shift+H) - remembers previous mode
+  let previousModeBeforeHide: 'PASSIVE' | 'INTERACTIVE' = 'INTERACTIVE';
+  const toggleVisibility = () => {
+    if (currentMode === 'HIDDEN') {
+      applyOverlayMode(previousModeBeforeHide);
+    } else {
+      previousModeBeforeHide = currentMode === 'PASSIVE' ? 'PASSIVE' : 'INTERACTIVE';
+      applyOverlayMode('HIDDEN');
+    }
+  };
+
   const privacyHotkey = process.env.HOTKEY_PRIVACY_TOGGLE || 'CommandOrControl+Shift+H';
-  globalShortcut.register(privacyHotkey, () => {
-    applyOverlayMode(currentMode === 'HIDDEN' ? 'PASSIVE' : 'HIDDEN');
-  });
+  globalShortcut.register(privacyHotkey, toggleVisibility);
 
   // Global Hotkey 2: Passive / Interactive Mode Toggle (Ctrl+Shift+I)
   const interactiveHotkey = process.env.HOTKEY_INTERACTIVE_TOGGLE || 'CommandOrControl+Shift+I';
@@ -248,7 +256,17 @@ app.whenReady().then(async () => {
     applyOverlayMode(currentMode === 'PASSIVE' ? 'INTERACTIVE' : 'PASSIVE');
   });
 
-  // Global Hotkey 3: Demo Q&A Trigger (Ctrl+Shift+T)
+  // Global Hotkey 3: Opacity Decrease (Ctrl+Shift+[)
+  globalShortcut.register('CommandOrControl+Shift+[', () => {
+    hudWin?.webContents.send('hud:adjust-opacity', -0.1);
+  });
+
+  // Global Hotkey 4: Opacity Increase (Ctrl+Shift+])
+  globalShortcut.register('CommandOrControl+Shift+]', () => {
+    hudWin?.webContents.send('hud:adjust-opacity', +0.1);
+  });
+
+  // Global Hotkey 5: Demo Q&A Trigger (Ctrl+Shift+T)
   const demoHotkey = process.env.HOTKEY_DEMO_TRIGGER || 'CommandOrControl+Shift+T';
   globalShortcut.register(demoHotkey, () => {
     if (activeSessionId) {
@@ -281,6 +299,12 @@ app.whenReady().then(async () => {
   // IPC Handlers
   ipcMain.handle('overlay:set-mode', (_, mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => applyOverlayMode(mode));
   ipcMain.handle('overlay:get-mode', () => currentMode);
+  ipcMain.handle('overlay:toggle-visibility', () => toggleVisibility());
+  ipcMain.handle('hud:set-opacity', (_, opacity: number) => {
+    if (!hudWin || hudWin.isDestroyed()) return;
+    const clamped = Math.max(0.15, Math.min(1.0, opacity));
+    hudWin.setOpacity(clamped);
+  });
 
   ipcMain.on('overlay:set-ignore-mouse-events', (event, ignore: boolean, options?: { forward: boolean }) => {
     const win = BrowserWindow.fromWebContents(event.sender);

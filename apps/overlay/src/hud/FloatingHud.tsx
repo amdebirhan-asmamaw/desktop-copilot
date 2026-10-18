@@ -16,6 +16,9 @@ interface CopilotApiBridge {
   copyToClipboard?: (text: string) => Promise<boolean>;
   setWindowPosition?: (x: number, y: number) => Promise<void>;
   getWindowPosition?: () => Promise<{ x: number; y: number }>;
+  onAdjustOpacity?: (cb: (delta: number) => void) => () => void;
+  setWindowOpacity?: (opacity: number) => Promise<void>;
+  toggleVisibility?: () => Promise<void>;
   onGhostStreamStart?: (cb: (data: { requestId: string; question: string; isDemo?: boolean }) => void) => () => void;
   onGhostStreamChunk?: (cb: (data: { requestId: string; text: string }) => void) => () => void;
   onGhostStreamEnd?: (cb: (data: { requestId: string; fullAnswer?: string }) => void) => () => void;
@@ -27,6 +30,7 @@ export const FloatingHud: React.FC = () => {
   const [micActive, setMicActive] = useState<boolean>(true);
   const [screenActive, setScreenActive] = useState<boolean>(true);
   const [showConfigModal, setShowConfigModal] = useState<boolean>(false);
+  const [showOpacitySlider, setShowOpacitySlider] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const [roleInput, setRoleInput] = useState<string>('Senior Distributed Systems Architect');
   const [instructionsInput, setInstructionsInput] = useState<string>('Deliver a spoken-ready conversational sentence opening with 5-7 concrete technical terms, followed by 2-3 key trade-off bullet points. Zero conversational filler.');
@@ -39,7 +43,10 @@ export const FloatingHud: React.FC = () => {
   const [streamedText, setStreamedText] = useState<string>('');
   const [answerStatus, setAnswerStatus] = useState<'IDLE' | 'STREAMING' | 'COMPLETED' | 'ERROR'>('IDLE');
   const [errorMessage, setErrorMessage] = useState<{ code: string; message: string } | null>(null);
-  const [cardOpacity, setCardOpacity] = useState<number>(0.96);
+  const [cardOpacity, setCardOpacity] = useState<number>(() => {
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('desktop_copilot_opacity') : null;
+    return saved ? parseFloat(saved) : 0.95;
+  });
   const [copiedQ, setCopiedQ] = useState<boolean>(false);
   const [copiedA, setCopiedA] = useState<boolean>(false);
   const [copiedAll, setCopiedAll] = useState<boolean>(false);
@@ -98,6 +105,41 @@ export const FloatingHud: React.FC = () => {
       if (info) setProviderInfo(info);
     });
 
+    const unsubOpacity = api.onAdjustOpacity?.((delta) => {
+      setCardOpacity((prev) => {
+        const next = Math.max(0.15, Math.min(1.0, Math.round((prev + delta) * 100) / 100));
+        localStorage.setItem('desktop_copilot_opacity', String(next));
+        api.setWindowOpacity?.(next);
+        return next;
+      });
+    });
+
+    const handleWindowKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+        if (e.key === '[' || e.key === '{') {
+          e.preventDefault();
+          setCardOpacity((prev) => {
+            const next = Math.max(0.15, Math.min(1.0, Math.round((prev - 0.1) * 100) / 100));
+            localStorage.setItem('desktop_copilot_opacity', String(next));
+            api.setWindowOpacity?.(next);
+            return next;
+          });
+        } else if (e.key === ']' || e.key === '}') {
+          e.preventDefault();
+          setCardOpacity((prev) => {
+            const next = Math.max(0.15, Math.min(1.0, Math.round((prev + 0.1) * 100) / 100));
+            localStorage.setItem('desktop_copilot_opacity', String(next));
+            api.setWindowOpacity?.(next);
+            return next;
+          });
+        } else if (e.key.toLowerCase() === 'h') {
+          e.preventDefault();
+          api.toggleVisibility?.();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleWindowKeyDown);
+
     return () => {
       unsubMode?.();
       unsubTranscript?.();
@@ -105,8 +147,18 @@ export const FloatingHud: React.FC = () => {
       unsubChunk?.();
       unsubEnd?.();
       unsubError?.();
+      unsubOpacity?.();
+      window.removeEventListener('keydown', handleWindowKeyDown);
     };
   }, []);
+
+  const updateOpacity = (val: number) => {
+    const clamped = Math.max(0.15, Math.min(1.0, Math.round(val * 100) / 100));
+    setCardOpacity(clamped);
+    localStorage.setItem('desktop_copilot_opacity', String(clamped));
+    const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+    api?.setWindowOpacity?.(clamped);
+  };
 
   const toggleOverlayMode = async () => {
     const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
@@ -383,6 +435,67 @@ export const FloatingHud: React.FC = () => {
               </button>
             </div>
 
+            {/* Transparency Controller Pill */}
+            <div className="relative flex items-center bg-slate-900/60 p-0.5 rounded-lg border border-white/10">
+              <button
+                type="button"
+                onClick={() => setShowOpacitySlider(!showOpacitySlider)}
+                className="h-6 px-2 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 text-slate-300 hover:text-white hover:bg-white/10"
+                title="Adjust Transparency (Ctrl+Shift+[ to dim, Ctrl+Shift+] to brighten)"
+              >
+                <span>💧</span>
+                <span className="text-[10px] font-mono font-semibold">{Math.round(cardOpacity * 100)}%</span>
+              </button>
+
+              {showOpacitySlider && (
+                <div
+                  className="absolute top-8 right-0 z-50 bg-slate-950/95 border border-white/15 p-2.5 rounded-xl shadow-2xl backdrop-blur-2xl flex flex-col gap-2 min-w-[170px] app-no-drag"
+                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                >
+                  <div className="flex items-center justify-between text-[10px] text-slate-300 font-medium">
+                    <span>Opacity</span>
+                    <span className="font-mono text-sky-400 font-bold">{Math.round(cardOpacity * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.15"
+                    max="1"
+                    step="0.05"
+                    value={cardOpacity}
+                    onChange={(e) => updateOpacity(parseFloat(e.target.value))}
+                    className="w-full h-1.5 bg-slate-700 rounded-lg cursor-pointer accent-sky-400"
+                  />
+                  <div className="flex items-center justify-between gap-1 text-[9px] text-slate-400">
+                    <button
+                      type="button"
+                      onClick={() => updateOpacity(0.35)}
+                      className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
+                    >
+                      35%
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateOpacity(0.70)}
+                      className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
+                    >
+                      70%
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateOpacity(1.0)}
+                      className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 hover:text-white transition-colors"
+                    >
+                      Solid
+                    </button>
+                  </div>
+                  <div className="text-[8.5px] text-slate-400 border-t border-white/10 pt-1 flex items-center justify-between">
+                    <span>Hotkeys:</span>
+                    <span className="font-mono text-slate-300">Ctrl+Shift+[ / ]</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* Demo Q&A Trigger Button */}
             <button
               type="button"
@@ -413,6 +526,22 @@ export const FloatingHud: React.FC = () => {
                 <span>Stop</span>
               </button>
             )}
+
+            {/* Hide Overlay Button */}
+            <button
+              type="button"
+              onClick={async () => {
+                const api = (window as unknown as { copilotApi?: CopilotApiBridge }).copilotApi;
+                await api?.toggleVisibility?.();
+              }}
+              className="h-7 px-2 rounded-lg text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center gap-1 text-xs select-none"
+              title="Hide Overlay (Ctrl+Shift+H) - Press Ctrl+Shift+H anywhere to bring it back"
+            >
+              <span>👁️</span>
+              <kbd className="text-[8.5px] font-mono text-slate-400 bg-black/40 px-1 py-0.2 rounded border border-white/10">
+                Ctrl+Shift+H
+              </kbd>
+            </button>
 
             {/* Settings Context Button */}
             <button
