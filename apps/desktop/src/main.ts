@@ -264,6 +264,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('overlay:set-mode', (_, mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => applyOverlayMode(mode));
   ipcMain.handle('overlay:get-mode', () => currentMode);
 
+  let hudOriginalY: number | null = null;
+
   ipcMain.handle('hud:set-size', (_, { width, height }: { width: number; height: number }) => {
     if (!hudWin || hudWin.isDestroyed()) return;
     const currentBounds = hudWin.getBounds();
@@ -272,10 +274,29 @@ app.whenReady().then(async () => {
 
     const currentDisplay = screen.getDisplayMatching(currentBounds);
     let newY = currentBounds.y;
-    if (currentDisplay) {
-      const maxY = currentDisplay.workArea.y + currentDisplay.workArea.height - targetH;
-      if (newY > maxY) {
-        newY = Math.max(currentDisplay.workArea.y, maxY);
+
+    if (targetH > 200) {
+      // Expanding for modal
+      if (hudOriginalY === null) {
+        hudOriginalY = currentBounds.y;
+      }
+      if (currentDisplay) {
+        const maxY = currentDisplay.workArea.y + currentDisplay.workArea.height - targetH;
+        if (newY > maxY) {
+          newY = Math.max(currentDisplay.workArea.y, maxY);
+        }
+      }
+    } else {
+      // Collapsing back to compact HUD
+      if (hudOriginalY !== null) {
+        newY = hudOriginalY;
+        hudOriginalY = null;
+      }
+      if (currentDisplay) {
+        const maxY = currentDisplay.workArea.y + currentDisplay.workArea.height - targetH;
+        if (newY > maxY) {
+          newY = Math.max(currentDisplay.workArea.y, maxY);
+        }
       }
     }
 

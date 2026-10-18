@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '../lib/utils';
 
 export interface DialogProps {
@@ -31,7 +32,7 @@ export const Dialog: React.FC<DialogProps> = ({
 
   if (!open) return null;
 
-  return (
+  const content = (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/40 backdrop-blur-xs animate-in fade-in-0 duration-150 [app-region:no-drag]"
       onClick={(e) => {
@@ -42,7 +43,7 @@ export const Dialog: React.FC<DialogProps> = ({
     >
       <div
         className={cn(
-          "relative w-full max-w-lg bg-slate-950/70 backdrop-blur-2xl border border-white/20 rounded-2xl p-4 shadow-[0_20px_50px_rgba(0,0,0,0.6)] [app-region:no-drag] flex flex-col max-h-[94vh] overflow-hidden text-slate-100",
+          "relative w-full max-w-lg bg-slate-950/80 backdrop-blur-2xl border border-white/20 rounded-2xl p-4 shadow-[0_20px_50px_rgba(0,0,0,0.6)] [app-region:no-drag] flex flex-col max-h-[92vh] overflow-hidden text-slate-100",
           className
         )}
       >
@@ -67,4 +68,9 @@ export const Dialog: React.FC<DialogProps> = ({
       </div>
     </div>
   );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(content, document.body);
+  }
+  return content;
 };
