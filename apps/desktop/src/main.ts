@@ -1,10 +1,11 @@
-import { app, BrowserWindow, globalShortcut, ipcMain } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHudWindow } from './windows/hud-window.js';
 import { createGhostOverlayWindow } from './windows/ghost-overlay-window.js';
-import { SessionManager, JsonSessionStore, isQuestionIntent } from '@repo/core';
-import { ConfigurableChatStreamingService, loadAIConfigFromEnv } from '@repo/ai';
+import { SessionManager, JsonSessionStore, OrchestrationPipeline } from '@repo/core';
+import { createChatProvider, loadAIConfigFromEnv } from '@repo/ai';
+import { validateScreenSnapshot, createBase64DataUrl } from '@repo/capture';
 
 // Ensure clean application name and isolated user data directory (avoids scoped package name / Windows cache errors)
 app.setName('desktop-copilot');
@@ -102,20 +103,89 @@ const storagePath = path.join(app.getPath('userData'), 'copilot-sessions.json');
 const sessionManager = new SessionManager(new JsonSessionStore(storagePath));
 
 const aiConfig = loadAIConfigFromEnv();
-const chatService = new ConfigurableChatStreamingService(aiConfig.capabilities.chatStreaming);
+const chatProvider = createChatProvider(aiConfig);
+const pipeline = new OrchestrationPipeline();
+
+export async function triggerQuestionAnswer(sessionId: string, question: string): Promise<void> {
+  const activeReq = pipeline.beginRequest(question);
+  const payload = await sessionManager.assembleContextPayload(sessionId);
+
+  ghostWin?.webContents.send('ghost:stream-start', {
+    requestId: activeReq.requestId,
+    question,
+    isDemo: chatProvider.id === 'demo'
+  });
+
+  let accumulatedText = '';
+
+  try {
+    for await (const event of chatProvider.streamAnswer(payload, question, {
+      signal: activeReq.signal,
+      requestId: activeReq.requestId
+    })) {
+      if (pipeline.getActiveRequestId() !== activeReq.requestId) {
+        break;
+      }
+
+      if (event.type === 'text-delta') {
+        accumulatedText += event.text;
+        ghostWin?.webContents.send('ghost:stream-chunk', {
+          requestId: activeReq.requestId,
+          text: event.text
+        });
+      } else if (event.type === 'error') {
+        ghostWin?.webContents.send('ghost:stream-error', {
+          requestId: activeReq.requestId,
+          error: event.error
+        });
+        return;
+      } else if (event.type === 'complete') {
+        ghostWin?.webContents.send('ghost:stream-end', {
+          requestId: activeReq.requestId,
+          fullAnswer: accumulatedText
+        });
+        await sessionManager.appendTranscript(sessionId, {
+          speaker: 'ASSISTANT',
+          text: accumulatedText
+        });
+        return;
+      }
+    }
+  } catch (err: unknown) {
+    if (!activeReq.signal.aborted) {
+      const message = err instanceof Error ? err.message : String(err);
+      ghostWin?.webContents.send('ghost:stream-error', {
+        requestId: activeReq.requestId,
+        error: { code: 'STREAM_FAILED', message }
+      });
+    }
+  }
+}
 
 export async function handleIncomingTranscript(
   sessionId: string,
   speaker: 'USER' | 'REMOTE_SPEAKER',
-  text: string
+  text: string,
+  isFinal: boolean = true
 ): Promise<void> {
+  hudWin?.webContents.send('transcript:event', {
+    speaker,
+    text,
+    isFinal,
+    timestamp: Date.now()
+  });
+
   await sessionManager.appendTranscript(sessionId, { speaker, text });
 
-  if (speaker === 'REMOTE_SPEAKER' && isQuestionIntent(text)) {
-    const payload = await sessionManager.assembleContextPayload(sessionId);
-    for await (const chunk of chatService.streamAnswer(payload, text)) {
-      ghostWin?.webContents.send('ghost:stream-chunk', chunk);
-    }
+  const decision = pipeline.processTranscriptChunk({
+    speaker,
+    text,
+    isFinal,
+    timestamp: Date.now()
+  });
+
+  if (decision.shouldTriggerAnswer && decision.question) {
+    await triggerQuestionAnswer(sessionId, decision.question);
   }
 }
 
@@ -160,7 +230,7 @@ app.whenReady().then(async () => {
 
   const initialSession = await sessionManager.createSession({
     roleOrPersona: 'Senior Distributed Systems Architect',
-    instructions: 'Keep responses concise with structured bullet points'
+    instructions: 'Keep responses concise with structured bullet points and high-level trade-offs'
   });
   activeSessionId = initialSession.sessionId;
 
@@ -184,7 +254,8 @@ app.whenReady().then(async () => {
       handleIncomingTranscript(
         activeSessionId,
         'REMOTE_SPEAKER',
-        'How do you handle network partitions and split-brain scenarios in a distributed cluster?'
+        'How do you handle network partitions and split-brain scenarios in a distributed cluster?',
+        true
       );
     }
   });
@@ -193,14 +264,61 @@ app.whenReady().then(async () => {
   ipcMain.handle('overlay:set-mode', (_, mode: 'PASSIVE' | 'INTERACTIVE' | 'HIDDEN') => applyOverlayMode(mode));
   ipcMain.handle('overlay:get-mode', () => currentMode);
 
-  ipcMain.on('ghost:stream-chunk', (_, text: string) => {
-    ghostWin?.webContents.send('ghost:stream-chunk', text);
+  ipcMain.handle('pipeline:cancel-active', () => {
+    const activeId = pipeline.getActiveRequestId();
+    if (activeId) {
+      pipeline.cancelActive('user_requested');
+      ghostWin?.webContents.send('ghost:stream-cancel', { requestId: activeId });
+    }
   });
 
-  ipcMain.handle('session:feed-transcript', async (_, { sessionId, speaker, text }) => {
+  ipcMain.handle('provider:status', () => ({
+    provider: chatProvider.id,
+    model: chatProvider.model,
+    isDemo: chatProvider.id === 'demo'
+  }));
+
+  ipcMain.handle('screen:capture-snapshot', async () => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: 1920, height: 1080 }
+      });
+
+      if (!sources || sources.length === 0) {
+        return { success: false, error: 'No display screens found' };
+      }
+
+      const primary = sources[0]!;
+      const jpegBuffer = primary.thumbnail.toJPEG(80);
+      const size = primary.thumbnail.getSize();
+
+      const snapshot = {
+        id: `snap_${Date.now()}`,
+        timestamp: Date.now(),
+        width: size.width,
+        height: size.height,
+        format: 'image/jpeg' as const,
+        buffer: jpegBuffer,
+        sourceTitle: primary.name
+      };
+
+      const validation = validateScreenSnapshot(snapshot);
+      if (!validation.isValid) {
+        return { success: false, error: validation.reason };
+      }
+
+      const dataUrl = createBase64DataUrl(snapshot);
+      return { success: true, dataUrl, width: size.width, height: size.height };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('session:feed-transcript', async (_, { sessionId, speaker, text, isFinal }) => {
     const targetId = sessionId || activeSessionId;
     if (!targetId) return;
-    return handleIncomingTranscript(targetId, speaker, text);
+    return handleIncomingTranscript(targetId, speaker, text, isFinal ?? true);
   });
 
   ipcMain.handle('session:create', async (_, initialContext) => {
