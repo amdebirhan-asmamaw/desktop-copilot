@@ -58,4 +58,22 @@ describe('SessionManager & Context Engine', () => {
     expect(contextPayload.recentTurns[0]?.text).toBe('Turn 3');
     expect(contextPayload.recentTurns[2]?.text).toBe('Turn 5');
   });
+
+  it('persists assistant turns and includes them in follow-up context packages', async () => {
+    const store = new JsonSessionStore(testStorePath);
+    const manager = new SessionManager(store);
+
+    const session = await manager.createSession({ roleOrPersona: 'Staff Engineer' });
+
+    await manager.appendTranscript(session.sessionId, { speaker: 'REMOTE_SPEAKER', text: 'What is Raft?' });
+    await manager.appendTranscript(session.sessionId, { speaker: 'ASSISTANT', text: 'Raft is a leader-based consensus algorithm.' });
+    await manager.appendTranscript(session.sessionId, { speaker: 'REMOTE_SPEAKER', text: 'How does it handle split votes?' });
+
+    const payload = await manager.assembleContextPayload(session.sessionId);
+    expect(payload.recentTurns).toHaveLength(3);
+    expect(payload.recentTurns[0]?.speaker).toBe('REMOTE_SPEAKER');
+    expect(payload.recentTurns[1]?.speaker).toBe('ASSISTANT');
+    expect(payload.recentTurns[1]?.text).toContain('Raft is a leader-based consensus');
+    expect(payload.recentTurns[2]?.speaker).toBe('REMOTE_SPEAKER');
+  });
 });
